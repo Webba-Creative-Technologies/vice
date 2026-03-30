@@ -50,6 +50,24 @@ export async function auditHeadersConfig(projectPath, spinner) {
     }
   }
 
+  // .htaccess files (Apache)
+  const htaccessPaths = ['', 'public', 'dist'].map(d => path.join(projectPath, d, '.htaccess'));
+  for (const filePath of htaccessPaths) {
+    if (!fs.existsSync(filePath)) continue;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    if (/Header\s+(set|always\s+set)\s+Content-Security-Policy/i.test(content)) cspFound = true;
+    if (/Header\s+(set|always\s+set)\s+Strict-Transport-Security/i.test(content)) hstsFound = true;
+  }
+
+  // <meta http-equiv> in HTML files
+  const htmlPaths = ['', 'public', 'dist', 'src'].map(d => path.join(projectPath, d, 'index.html'));
+  for (const filePath of htmlPaths) {
+    if (!fs.existsSync(filePath)) continue;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    if (/<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["']/i.test(content)) cspFound = true;
+    if (/<meta\s+http-equiv\s*=\s*["']Strict-Transport-Security["']/i.test(content)) hstsFound = true;
+  }
+
   if (!cspFound) addFinding('HIGH', 'Headers Config', 'No CSP configuration found in project', 'Content-Security-Policy is not configured anywhere', 'Add CSP in your server or framework configuration');
   if (!hstsFound) addFinding('HIGH', 'Headers Config', 'No HSTS configuration found in project', 'Strict-Transport-Security is not configured anywhere', 'Add HSTS in your server configuration');
 }
