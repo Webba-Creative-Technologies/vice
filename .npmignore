@@ -1,0 +1,14 @@
+.claude/
+.vice-accepted
+assets/
+scans/
+CONTRIBUTING.md
+MARKETING.md
+node_modules/
+*.log
+*.tgz
+.DS_Store
+Thumbs.db
+.env*
+.git/
+.gitignore

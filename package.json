@@ -1,0 +1,47 @@
+{
+  "name": "vice-security",
+  "version": "3.0.0",
+  "description": "VICE - Vulnerability Inspector & Code Examiner | Black-box & white-box security auditor for web applications",
+  "author": "Webba Creative Technologies",
+  "license": "MIT",
+  "main": "bin/vice.js",
+  "type": "module",
+  "bin": {
+    "vice": "bin/vice.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "scan.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/vice.js",
+    "scan": "node scan.js",
+    "audit": "node bin/vice.js audit .",
+    "ci": "node bin/vice.js audit . --ci",
+    "prepublishOnly": "node --input-type=module -e \"import{readFileSync}from'fs';const p=JSON.parse(readFileSync('package.json'));console.log('Publishing '+p.name+'@'+p.version)\""
+  },
+  "keywords": ["security", "audit", "vulnerability", "scanner", "supabase", "pentest", "xss", "sql-injection", "owasp", "rls", "headers", "csp"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Webba-Creative-Technologies/vice"
+  },
+  "homepage": "https://github.com/Webba-Creative-Technologies/vice#readme",
+  "bugs": {
+    "url": "https://github.com/Webba-Creative-Technologies/vice/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "cheerio": "^1.0.0",
+    "inquirer": "^9.2.12",
+    "ora": "^7.0.1"
+  },
+  "optionalDependencies": {
+    "puppeteer": "^23.11.1"
+  }
+}

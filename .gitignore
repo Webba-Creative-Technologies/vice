@@ -1,0 +1,10 @@
+node_modules/
+scans/
+.env*
+.vice-accepted
+*.log
+*.tgz
+MARKETING.md
+.DS_Store
+Thumbs.db
+.claude/
