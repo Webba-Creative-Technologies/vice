@@ -5,6 +5,7 @@
 
 import ora from 'ora';
 import chalk from 'chalk';
+import { loadViceignore } from '../utils/ignore.js';
 import { auditSecrets } from './secrets.js';
 import { auditEnvFiles } from './env.js';
 import { auditDependencies } from './dependencies.js';
@@ -24,6 +25,7 @@ export const LOCAL_MODULES = [
 ];
 
 export async function runLocalAudit(projectPath, selectedModules) {
+  const isIgnored = loadViceignore(projectPath);
   console.log('');
 
   for (const mod of LOCAL_MODULES) {
@@ -31,7 +33,7 @@ export async function runLocalAudit(projectPath, selectedModules) {
 
     const spinner = ora({ text: mod.name + '...', color: 'magenta' }).start();
     try {
-      await mod.fn(projectPath, spinner);
+      await mod.fn(projectPath, spinner, isIgnored);
       spinner.succeed(chalk.green(mod.name));
     } catch (err) {
       spinner.fail(chalk.red(`${mod.name}: ${err.message}`));

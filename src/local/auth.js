@@ -23,7 +23,7 @@ function findFiles(dir, extensions, ignore = ['node_modules', '.git', '.next', '
   return results;
 }
 
-export async function auditAuth(projectPath, spinner) {
+export async function auditAuth(projectPath, spinner, isIgnored = () => false) {
   spinner.text = 'Auditing auth & middleware configuration...';
   const codeFiles = findFiles(projectPath, ['.js', '.ts', '.jsx', '.tsx', '.vue', '.svelte']);
 
@@ -73,8 +73,17 @@ export async function auditAuth(projectPath, spinner) {
       addFinding('HIGH', 'Auth & Middleware', `JWT without expiration in ${rel}`, 'A JWT without expiration is valid forever if stolen', 'Add expiresIn: \'1h\' or \'7d\' to jwt.sign() options');
     }
 
-    if (/password\s*[:=]\s*["'][^"']{4,}["']/i.test(content) && !/test|example|placeholder|mock|fixture/i.test(rel)) {
-      addFinding('CRITICAL', 'Auth & Middleware', `Hardcoded password in ${rel}`, 'A password is hardcoded in source code', 'Move to environment variables');
+    if (!/test|example|placeholder|mock|fixture|i18n|locales?|translations?|lang|languages/i.test(rel) && !isIgnored(rel)) {
+      const pwRegex = /password\s*[:=]\s*["']([^"']{4,})["']/gi;
+      let pwMatch;
+      while ((pwMatch = pwRegex.exec(content)) !== null) {
+        const val = pwMatch[1];
+        if (/\s/.test(val)) continue;
+        if (/^password$/i.test(val)) continue;
+        if (/^[\p{Lu}][\p{Ll}]+$/u.test(val)) continue;
+        addFinding('CRITICAL', 'Auth & Middleware', `Hardcoded password in ${rel}`, 'A password is hardcoded in source code', 'Move to environment variables');
+        break;
+      }
     }
   }
 

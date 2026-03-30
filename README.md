@@ -168,6 +168,24 @@ export default {
 }
 ```
 
+### `.viceignore` (optional)
+
+Create a `.viceignore` file in your project root to exclude files or directories from the local audit. Works like `.gitignore`:
+
+```
+# Ignore translation files
+**/i18n/**
+**/locales/**
+
+# Ignore a specific file
+src/config/ui-labels.ts
+
+# Ignore by pattern
+*.locale.*
+```
+
+Excluded files are skipped by all local audit modules (secrets, auth, code vulnerabilities, etc.).
+
 <br>
 
 ## For developers

@@ -31,7 +31,7 @@ function walkDir(dir, ignore = []) {
   return results;
 }
 
-export async function auditSecrets(projectPath, spinner) {
+export async function auditSecrets(projectPath, spinner, isIgnored = () => false) {
   spinner.text = 'Scanning source code for secrets...';
   const files = walkDir(projectPath);
   let found = 0;
@@ -42,6 +42,7 @@ export async function auditSecrets(projectPath, spinner) {
     let content;
     try { content = fs.readFileSync(filePath, 'utf-8'); } catch { continue; }
     const relativePath = path.relative(projectPath, filePath);
+    if (isIgnored(relativePath)) continue;
 
     for (const pattern of SECRET_PATTERNS) {
       const matches = content.match(pattern.regex);
