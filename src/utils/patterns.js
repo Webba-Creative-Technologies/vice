@@ -29,7 +29,6 @@ export const SECURITY_HEADERS = [
   { name: 'X-Content-Type-Options',    severity: 'MOYENNE' },
   { name: 'Referrer-Policy',           severity: 'FAIBLE' },
   { name: 'Permissions-Policy',        severity: 'FAIBLE' },
-  { name: 'X-XSS-Protection',          severity: 'FAIBLE' },
 ];
 
 export const LEAK_HEADERS = ['X-Powered-By', 'Server', 'X-AspNet-Version', 'X-AspNetMvc-Version'];

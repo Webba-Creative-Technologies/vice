@@ -51,6 +51,21 @@ export async function auditSecrets(projectPath, spinner, isIgnored = () => false
       for (const match of matches) {
         if (/your_|example|placeholder|xxx|yyy|zzz|changeme|replace_|INSERT_|TODO|FIXME|sk_test_|pk_test_/i.test(match)) continue;
         if (/Bearer\s+(xxx|token|your|example|test)/i.test(match)) continue;
+
+        // Filter out environment variable references (not actual secrets)
+        if (/process\.env\.|import\.meta\.env\.|os\.environ|getenv\(|ENV\[|System\.getenv/i.test(match)) continue;
+
+        // For Generic patterns, check the full line for env var context
+        if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
+          const matchIndex = content.indexOf(match);
+          if (matchIndex !== -1) {
+            const lineStart = content.lastIndexOf('\n', matchIndex) + 1;
+            const lineEnd = content.indexOf('\n', matchIndex + match.length);
+            const line = content.substring(lineStart, lineEnd === -1 ? undefined : lineEnd);
+            if (/process\.env|import\.meta\.env|os\.environ|getenv|ENV\[|System\.getenv|config\(|Config\./i.test(line)) continue;
+          }
+        }
+
         if (seenValues.has(match)) continue;
         seenValues.add(match);
 

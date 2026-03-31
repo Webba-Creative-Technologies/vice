@@ -46,7 +46,6 @@ const SECURITY_HEADERS = [
   { name: 'X-Content-Type-Options',    severity: 'MOYENNE' },
   { name: 'Referrer-Policy',           severity: 'FAIBLE' },
   { name: 'Permissions-Policy',        severity: 'FAIBLE' },
-  { name: 'X-XSS-Protection',          severity: 'FAIBLE' },
 ];
 
 const LEAK_HEADERS = ['X-Powered-By', 'Server', 'X-AspNet-Version', 'X-AspNetMvc-Version'];
@@ -207,6 +206,18 @@ function analyzeScripts(jsContents, spinner) {
           if (/your_|example|placeholder|xxx|yyy|zzz|changeme|replace_|INSERT_|TODO|FIXME/i.test(match)) continue;
           if (/Bearer\s+(xxx|token|your|example|wbt_xxx|test)/i.test(match)) continue;
 
+          // Filter out environment variable references (not actual secrets)
+          if (/process\.env\.|import\.meta\.env\.|os\.environ|getenv\(|ENV\[|System\.getenv/i.test(match)) continue;
+
+          // For Generic patterns, check surrounding context for env var references
+          if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
+            const matchIndex = js.indexOf(match);
+            if (matchIndex !== -1) {
+              const context = js.substring(Math.max(0, matchIndex - 50), matchIndex + match.length + 50);
+              if (/process\.env|import\.meta\.env|os\.environ|getenv|ENV\[|System\.getenv|config\[|Config\./i.test(context)) continue;
+            }
+          }
+
           // JWT deduplication (same anon key detected as service_role)
           if (pattern.name.includes('Supabase') && match.startsWith('eyJ')) {
             if (seenJwts.has(match)) continue;
@@ -364,12 +375,27 @@ async function checkHeaders(baseUrl, spinner) {
   if (!res) return;
 
   const headers = res.headers;
+  const htmlBody = await res.text();
 
   // Missing security headers
   for (const h of SECURITY_HEADERS) {
     if (!headers.get(h.name.toLowerCase())) {
+      // Check for CSP via meta tag before reporting missing
+      if (h.name === 'Content-Security-Policy') {
+        const metaCspMatch = htmlBody.match(/<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["'][^>]*content\s*=\s*["']([^"']+)["']/i);
+        if (metaCspMatch) {
+          addFinding('FAIBLE', 'Headers', 'CSP defined via meta tag (not HTTP header)', `Content-Security-Policy is set via <meta> tag: "${metaCspMatch[1].substring(0, 120)}..."\nMeta tag CSP has limitations: cannot set frame-ancestors, report-uri, or sandbox directives.`, 'Move the Content-Security-Policy to an HTTP response header for full protection');
+          continue;
+        }
+      }
       addFinding(h.severity, 'Headers', `Missing security header: ${h.name}`, `The ${h.name} header is not present in the response`, `Add the ${h.name} header in the server configuration`);
     }
+  }
+
+  // Deprecated header check
+  const xssProtection = headers.get('x-xss-protection');
+  if (xssProtection) {
+    addFinding('INFO', 'Headers', 'Deprecated header present: X-XSS-Protection', `X-XSS-Protection: ${xssProtection}\nThis header is deprecated — Chrome removed the XSS Auditor in 2019. No modern browser supports it.`, 'Remove the X-XSS-Protection header. Use Content-Security-Policy instead.');
   }
 
   // Headers leaking information
@@ -1096,7 +1122,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
           // Check if the payload is reflected in the DOM without execution
           const bodyHtml = await page.content();
           if (bodyHtml.includes(payload)) {
-            addFinding('ELEVEE', 'XSS', `XSS payload reflected in the DOM via "${param}"`, `Payload: ${payload}\nThe payload is present in the page HTML but was not executed (browser protection or CSP possible).`, 'Escape user output server-side. Never insert unfiltered content into the DOM.');
+            addFinding('FAIBLE', 'XSS', `XSS payload reflected (not executed) via "${param}"`, `Payload: ${payload}\nThe payload is present in the page HTML but execution was blocked (CSP, encoding, or browser protection).\nThis is informational — the server reflects user input, but the payload did NOT execute.`, 'Escape user output server-side. Never insert unfiltered content into the DOM. The current CSP or encoding appears effective, but defense-in-depth is recommended.');
             xssFound = true;
             break;
           }
@@ -1302,7 +1328,16 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
   {
     const res = await safeFetch(baseUrl);
     if (res) {
-      const csp = res.headers.get('content-security-policy') || '';
+      let csp = res.headers.get('content-security-policy') || '';
+      if (!csp) {
+        // Check for CSP via meta tag before reporting CRITIQUE
+        const cspBody = await res.text();
+        const metaCspMatch = cspBody.match(/<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["'][^>]*content\s*=\s*["']([^"']+)["']/i);
+        if (metaCspMatch) {
+          csp = metaCspMatch[1];
+          addFinding('FAIBLE', 'CSP', 'CSP defined via meta tag only', `Content-Security-Policy is set via <meta> tag: "${csp.substring(0, 120)}..."\nMeta tag CSP has limitations: cannot set frame-ancestors, report-uri, or sandbox directives.`, 'Move CSP to an HTTP response header for full protection');
+        }
+      }
       if (!csp) {
         addFinding('CRITIQUE', 'CSP', 'No Content-Security-Policy', 'Without CSP, any script can execute on the page:\n- Keylogger injection\n- Token/cookie theft via fetch to an external server\n- DOM modification (defacing, fake login forms)\n- Crypto mining in visitors\' browsers', 'Add a strict CSP. Minimal example:\nContent-Security-Policy: default-src \'self\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data:; connect-src \'self\' https://*.supabase.co');
       } else {
@@ -1356,6 +1391,12 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
   // ── SCENARIO 10 : HTTP Method testing ──
   spinner.text = 'Testing dangerous HTTP methods...';
   {
+    // Get a reference GET response for comparison
+    const getRef = await safeFetch(baseUrl);
+    const getBody = getRef ? await getRef.text() : '';
+    const getStatus = getRef ? getRef.status : 0;
+    const getBodyStart = getBody.substring(0, 500);
+
     const dangerousMethods = ['PUT', 'DELETE', 'TRACE', 'OPTIONS'];
 
     for (const method of dangerousMethods) {
@@ -1369,12 +1410,19 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
         }
       }
 
-      if (method === 'PUT' && (res.status === 200 || res.status === 201)) {
-        addFinding('ELEVEE', 'HTTP Methods', 'PUT method accepted', `The server accepts PUT on ${baseUrl} (status ${res.status}) — an attacker could modify files`, 'Disable PUT except on API endpoints that require it');
-      }
+      if ((method === 'PUT' || method === 'DELETE') && (res.status === 200 || res.status === 201 || res.status === 204)) {
+        const body = await res.text();
+        const bodyStart = body.substring(0, 500);
 
-      if (method === 'DELETE' && (res.status === 200 || res.status === 204)) {
-        addFinding('ELEVEE', 'HTTP Methods', 'DELETE method accepted', `The server accepts DELETE on ${baseUrl} (status ${res.status})`, 'Disable DELETE except on API endpoints that require it');
+        // Check if the response is identical to GET (server ignoring the method)
+        const sameAsGet = res.status === getStatus && Math.abs(body.length - getBody.length) < 100 && bodyStart === getBodyStart;
+        const methodNotAllowed = /method not allowed|not supported|invalid method|405/i.test(body);
+
+        if (sameAsGet || methodNotAllowed) {
+          addFinding('INFO', 'HTTP Methods', `${method} returns same response as GET`, `The server responds to ${method} on ${baseUrl} (status ${res.status}) but the response is identical to GET — the method is likely not actually processed.`, '');
+        } else {
+          addFinding('ELEVEE', 'HTTP Methods', `${method} method accepted`, `The server accepts ${method} on ${baseUrl} (status ${res.status}) and the response differs from GET — the method may be actively processed.`, `Disable ${method} except on API endpoints that require it`);
+        }
       }
     }
   }
@@ -2052,7 +2100,7 @@ const STACK_SIGNATURES = {
   // Backend
   'Express':       { html: [], headers: ['x-powered-by:express'], js: [] },
   'PHP':           { html: [/\.php/], headers: ['x-powered-by:php'], js: [] },
-  'Django':        { html: [/csrfmiddlewaretoken/, /django/i], headers: ['x-frame-options:deny'], js: [] },
+  'Django':        { html: [/csrfmiddlewaretoken/, /django/i], headers: [], js: [] },
   'Ruby on Rails': { html: [/csrf-token/, /rails/i], headers: ['x-powered-by:phusion', 'x-request-id', 'x-runtime'], js: [] },
   'Laravel':       { html: [/laravel/i, /_token/], headers: ['x-powered-by:php', 'set-cookie:.*laravel_session'], js: [] },
 
