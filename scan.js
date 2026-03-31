@@ -6,7 +6,7 @@ import { getViceDataDir } from './src/utils/paths.js';
 
 // ─────────────────────────────────────────────
 // VICE - Vulnerability Inspector & Code Examiner
-// Black-Box Security Auditor v2.0
+// Black-Box Security Auditor v3.0
 // Webba Creative Technologies (c) 2026
 // ─────────────────────────────────────────────
 
@@ -3030,7 +3030,7 @@ function printReport() {
 
   console.log('\n' + chalk.bold('━'.repeat(60)));
   console.log(`  Score: ${color(` ${grade} `)} (${score}/100) — Total: ${findings.length} finding(s)`);
-  console.log(chalk.gray('  VICE v2.0 — Webba Creative Technologies (c) 2026'));
+  console.log(chalk.gray('  VICE v3.0 — Webba Creative Technologies (c) 2026'));
   console.log(chalk.bold('━'.repeat(60)) + '\n');
 }
 
@@ -3181,7 +3181,7 @@ async function viewHistory() {
 
   console.log('\n' + chalk.bold('━'.repeat(60)));
   console.log(`  Score: ${gradeColorFn(` ${scan.grade} `)} (${scan.score}/100) — Total: ${scan.nbFindings} finding(s)`);
-  console.log(chalk.gray('  VICE v2.0 — Webba Creative Technologies (c) 2026'));
+  console.log(chalk.gray('  VICE v3.0 — Webba Creative Technologies (c) 2026'));
   console.log(chalk.bold('━'.repeat(60)) + '\n');
 
   // Proposer d'exporter en HTML si c'est un JSON
