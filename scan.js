@@ -41,14 +41,15 @@ const IP_PATTERN = /(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)\.){3}(?:25[
 
 const SECURITY_HEADERS = [
   { name: 'Strict-Transport-Security', severity: 'ELEVEE' },
-  { name: 'Content-Security-Policy',   severity: 'ELEVEE' },
-  { name: 'X-Frame-Options',           severity: 'MOYENNE' },
+  // Content-Security-Policy handled by CSP Bypass module (Scenario 8) — avoids double counting
+  // X-Frame-Options handled by Clickjacking module (Scenario 1) — avoids double counting
   { name: 'X-Content-Type-Options',    severity: 'MOYENNE' },
   { name: 'Referrer-Policy',           severity: 'FAIBLE' },
   { name: 'Permissions-Policy',        severity: 'FAIBLE' },
 ];
 
-const LEAK_HEADERS = ['X-Powered-By', 'Server', 'X-AspNet-Version', 'X-AspNetMvc-Version'];
+// Server header handled by Stack Detection module — avoids double counting
+const LEAK_HEADERS = ['X-Powered-By', 'X-AspNet-Version', 'X-AspNetMvc-Version'];
 
 const findings = [];
 const discoveredIps = new Set();
@@ -375,19 +376,10 @@ async function checkHeaders(baseUrl, spinner) {
   if (!res) return;
 
   const headers = res.headers;
-  const htmlBody = await res.text();
 
-  // Missing security headers
+  // Missing security headers (CSP and X-Frame-Options excluded — handled by dedicated modules)
   for (const h of SECURITY_HEADERS) {
     if (!headers.get(h.name.toLowerCase())) {
-      // Check for CSP via meta tag before reporting missing
-      if (h.name === 'Content-Security-Policy') {
-        const metaCspMatch = htmlBody.match(/<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["'][^>]*content\s*=\s*["']([^"']+)["']/i);
-        if (metaCspMatch) {
-          addFinding('FAIBLE', 'Headers', 'CSP defined via meta tag (not HTTP header)', `Content-Security-Policy is set via <meta> tag: "${metaCspMatch[1].substring(0, 120)}..."\nMeta tag CSP has limitations: cannot set frame-ancestors, report-uri, or sandbox directives.`, 'Move the Content-Security-Policy to an HTTP response header for full protection');
-          continue;
-        }
-      }
       addFinding(h.severity, 'Headers', `Missing security header: ${h.name}`, `The ${h.name} header is not present in the response`, `Add the ${h.name} header in the server configuration`);
     }
   }
@@ -2163,6 +2155,7 @@ async function detectStack(baseUrl, jsContents, spinner) {
 
   for (const [techName, signatures] of Object.entries(STACK_SIGNATURES)) {
     const sources = [];
+    const seenSources = new Set();
 
     // Check headers
     for (const headerPattern of signatures.headers) {
@@ -2171,7 +2164,11 @@ async function detectStack(baseUrl, jsContents, spinner) {
         // Find which specific header matched
         for (const [k, v] of Object.entries(headers)) {
           if (regex.test(`${k}:${v}`) || regex.test(k)) {
-            sources.push(`Header: ${k}: ${v}`);
+            const source = `Header: ${k}: ${v}`;
+            if (!seenSources.has(source)) {
+              seenSources.add(source);
+              sources.push(source);
+            }
           }
         }
       }
