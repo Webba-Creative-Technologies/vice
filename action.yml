@@ -1,0 +1,105 @@
+name: 'VICE Security Audit'
+description: 'Audit your project for security vulnerabilities. Posts findings on PRs and maintains a security badge in your repo.'
+author: 'Webba Creative Technologies'
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  path:
+    description: 'Project path to audit (default: repo root)'
+    required: false
+    default: '.'
+  min-score:
+    description: 'Minimum score required to pass (0-100)'
+    required: false
+    default: '70'
+  fail-on-score:
+    description: 'Fail the workflow if score is below min-score'
+    required: false
+    default: 'true'
+  comment-pr:
+    description: 'Post a comment on pull requests with the scan results'
+    required: false
+    default: 'true'
+  update-badge:
+    description: 'Update the security badge file on push events'
+    required: false
+    default: 'true'
+  badge-path:
+    description: 'Path to the badge JSON file (relative to repo root)'
+    required: false
+    default: '.github/vice-badge.json'
+  github-token:
+    description: 'GitHub token used for posting PR comments and committing the badge'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  score:
+    description: 'Security score from 0 to 100'
+    value: ${{ steps.set-outputs.outputs.score }}
+  grade:
+    description: 'Security grade from A to F'
+    value: ${{ steps.set-outputs.outputs.grade }}
+  total-findings:
+    description: 'Total number of findings'
+    value: ${{ steps.set-outputs.outputs.total }}
+  critical-findings:
+    description: 'Number of critical findings'
+    value: ${{ steps.set-outputs.outputs.critical }}
+  high-findings:
+    description: 'Number of high severity findings'
+    value: ${{ steps.set-outputs.outputs.high }}
+  report-path:
+    description: 'Absolute path to the JSON report file produced by the scan'
+    value: ${{ steps.set-outputs.outputs.report-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install VICE dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm install --omit=dev --omit=optional --no-audit --no-fund --silent
+
+    - name: Run VICE audit
+      id: scan
+      shell: bash
+      env:
+        VICE_ACCEPT_TERMS: '1'
+      continue-on-error: true
+      run: |
+        node "${{ github.action_path }}/bin/vice.js" audit "${{ inputs.path }}" --ci --json --min-score "${{ inputs.min-score }}" > "${{ runner.temp }}/vice-results.json"
+
+    - name: Set action outputs
+      id: set-outputs
+      shell: bash
+      run: node "${{ github.action_path }}/action/set-outputs.mjs" "${{ runner.temp }}/vice-results.json"
+
+    - name: Post pull request comment
+      if: github.event_name == 'pull_request' && inputs.comment-pr == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        GITHUB_BASE_REF: ${{ github.base_ref }}
+        BADGE_PATH: ${{ inputs.badge-path }}
+      run: node "${{ github.action_path }}/action/post-comment.mjs" "${{ runner.temp }}/vice-results.json"
+
+    - name: Update security badge
+      if: github.event_name == 'push' && inputs.update-badge == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+      run: node "${{ github.action_path }}/action/update-badge.mjs" "${{ runner.temp }}/vice-results.json" "${{ inputs.badge-path }}"
+
+    - name: Fail if score below threshold
+      if: inputs.fail-on-score == 'true' && steps.scan.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::error::VICE security score is below the minimum threshold of ${{ inputs.min-score }}"
+        exit 1
