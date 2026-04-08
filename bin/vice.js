@@ -25,6 +25,7 @@ import { calculateScore, severityColor } from '../src/core/score.js';
 import { printReport } from '../src/core/reporter/console.js';
 import { exportJson } from '../src/core/reporter/json.js';
 import { exportHtml } from '../src/core/reporter/html.js';
+import { writeBadgeFile, readReportFile, findLatestReport } from '../src/core/badge.js';
 
 // ──────────── BANNER ────────────
 
@@ -49,6 +50,14 @@ function printBanner() {
 
 async function checkDisclaimer(isCi = false) {
   if (fs.existsSync(DISCLAIMER_FILE)) return true;
+
+  // Auto-accept via environment variable (used by GitHub Action and other CI integrations)
+  if (process.env.VICE_ACCEPT_TERMS === '1') {
+    fs.writeFileSync(DISCLAIMER_FILE, `Accepted on ${new Date().toISOString()} via VICE_ACCEPT_TERMS\n`);
+    process.stderr.write('VICE: terms accepted via VICE_ACCEPT_TERMS environment variable.\n');
+    process.stderr.write('VICE must only be used on systems you own or are authorized to test.\n');
+    return true;
+  }
 
   console.log(chalk.red.bold('\n  ┌─────────────────────────────────────────────────────────┐'));
   console.log(chalk.red.bold('  │                    LEGAL DISCLAIMER                     │'));
@@ -238,6 +247,112 @@ async function runCiMode(target, minScore = 70) {
   }
 }
 
+// ──────────── JSON AUDIT MODE (for CI / GitHub Action) ────────────
+
+function buildSummary(findings) {
+  const summary = { total: findings.length, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const f of findings) {
+    const sev = f.severity;
+    if (sev === 'CRITICAL' || sev === 'CRITIQUE') summary.critical++;
+    else if (sev === 'HIGH' || sev === 'ELEVEE') summary.high++;
+    else if (sev === 'MEDIUM' || sev === 'MOYENNE') summary.medium++;
+    else if (sev === 'LOW' || sev === 'FAIBLE') summary.low++;
+    else if (sev === 'INFO') summary.info++;
+  }
+  return summary;
+}
+
+function readPkgVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(PKG_DIR, 'package.json'), 'utf-8'));
+    return pkg.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function runJsonAuditMode(target, minScore) {
+  // Redirect all stdout writes to stderr during the audit so the final JSON
+  // is the only thing written to stdout. Spinner output (ora) and console.log
+  // calls from modules will all land on stderr.
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, encoding, cb) => process.stderr.write(chunk, encoding, cb);
+
+  const finish = (data, exitCode = 0) => {
+    process.stdout.write = originalWrite;
+    process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    process.exit(exitCode);
+  };
+
+  try {
+    const accepted = await checkDisclaimer(true);
+    if (!accepted) {
+      finish({ error: 'Terms not accepted. Set VICE_ACCEPT_TERMS=1 to bypass.' }, 1);
+      return;
+    }
+
+    const resolved = path.resolve(target);
+    if (!fs.existsSync(resolved)) {
+      finish({ error: `Path not found: ${resolved}` }, 1);
+      return;
+    }
+
+    clearFindings();
+    const allModules = LOCAL_MODULES.map(m => m.value);
+    await runLocalAudit(resolved, allModules);
+
+    const findings = getFindings();
+    const { score, grade } = calculateScore();
+
+    // Best-effort: still save to history so the file is available locally
+    try { await exportJson(resolved, DATA_DIR); } catch {}
+
+    const output = {
+      version: readPkgVersion(),
+      target: resolved,
+      timestamp: new Date().toISOString(),
+      score,
+      grade,
+      summary: buildSummary(findings),
+      findings,
+    };
+
+    const exitCode = (minScore !== null && score < minScore) ? 1 : 0;
+    finish(output, exitCode);
+  } catch (err) {
+    finish({ error: err.message, stack: err.stack }, 1);
+  }
+}
+
+// ──────────── BADGE COMMAND ────────────
+
+async function runBadgeCommand(args) {
+  const inputIdx = args.indexOf('--input');
+  const outputIdx = args.indexOf('--output');
+
+  let inputPath = inputIdx !== -1 ? args[inputIdx + 1] : null;
+  const outputPath = outputIdx !== -1 ? args[outputIdx + 1] : '.github/vice-badge.json';
+
+  if (!inputPath) {
+    inputPath = findLatestReport(path.join(DATA_DIR, 'scans'));
+    if (!inputPath) {
+      console.error(chalk.red('  No scan report found. Run "vice audit ." first or specify --input <path>.'));
+      process.exit(1);
+    }
+  }
+
+  try {
+    const { score, grade } = readReportFile(inputPath);
+    const written = writeBadgeFile(score, grade, outputPath);
+    console.log(chalk.green(`  Badge written to ${written}`));
+    console.log(chalk.gray(`  Score: ${grade} (${score}/100)`));
+    console.log(chalk.gray(`  Source: ${inputPath}`));
+  } catch (err) {
+    console.error(chalk.red(`  Failed to generate badge: ${err.message}`));
+    process.exit(1);
+  }
+}
+
 // ──────────── MAIN ────────────
 
 async function main() {
@@ -248,10 +363,22 @@ async function main() {
     const command = args[0];
 
     if (command === 'audit') {
+      const jsonMode = args.includes('--json');
+      const ciMode = args.includes('--ci');
+      const target = args[1] && !args[1].startsWith('--') ? args[1] : '.';
+
+      // JSON mode: clean stdout output for machine consumption
+      if (jsonMode) {
+        const minIdx = args.indexOf('--min-score');
+        const minScore = minIdx !== -1 ? parseInt(args[minIdx + 1]) : (ciMode ? 70 : null);
+        await runJsonAuditMode(target, minScore);
+        return;
+      }
+
       printBanner();
-      await checkDisclaimer(args.includes('--ci'));
-      const target = args[1] || '.';
-      if (args.includes('--ci')) {
+      await checkDisclaimer(ciMode);
+
+      if (ciMode) {
         const minIdx = args.indexOf('--min-score');
         const minScore = minIdx !== -1 ? parseInt(args[minIdx + 1]) : 70;
         await runCiMode(target, minScore);
@@ -280,14 +407,22 @@ async function main() {
       return;
     }
 
+    if (command === 'badge') {
+      await runBadgeCommand(args);
+      return;
+    }
+
     // Help
     console.log(chalk.bold('\n  VICE — Vulnerability Inspector & Code Examiner\n'));
     console.log('  Usage:');
-    console.log('    vice scan                  Remote scan (black-box, URL)');
-    console.log('    vice audit [path]          Local audit (white-box, source code)');
-    console.log('    vice audit [path] --ci     CI mode (exits 0 if score >= threshold)');
+    console.log('    vice scan                            Remote scan (black-box, URL)');
+    console.log('    vice audit [path]                    Local audit (white-box, source code)');
+    console.log('    vice audit [path] --ci               CI mode (exits 0 if score >= threshold)');
+    console.log('    vice audit [path] --ci --json        Machine-readable JSON output to stdout');
     console.log('    vice audit . --ci --min-score 80');
-    console.log('    vice history               View saved scan reports\n');
+    console.log('    vice badge --input <report.json>     Generate shields.io badge from a report');
+    console.log('         [--output .github/vice-badge.json]');
+    console.log('    vice history                         View saved scan reports\n');
     return;
   }
 

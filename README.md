@@ -16,6 +16,7 @@
 <p align="center">
   <a href="https://discord.gg/RKPEa4Kdht"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://www.npmjs.com/package/vice-security"><img src="https://img.shields.io/npm/v/vice-security?color=%23995ff6&label=npm" alt="npm"></a>
+  <a href="#github-action"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Webba-Creative-Technologies/vice/main/.github/vice-badge.json" alt="VICE Security"></a>
   <a href="https://github.com/Webba-Creative-Technologies/vice/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node">
   <img src="https://img.shields.io/badge/modules-22-995ff6" alt="Modules">
@@ -50,6 +51,97 @@ vice audit .           # Local audit (white-box)
 vice audit . --ci      # CI mode (exit code 0 or 1)
 vice history           # View saved reports
 ```
+
+<br>
+
+## GitHub Action
+
+VICE ships as a GitHub Action that scans your code on every pull request and push, posts findings as a PR comment, and maintains a security badge in your repo.
+
+### Quickstart
+
+Add `.github/workflows/security.yml` to your repo:
+
+```yaml
+name: Security
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  vice:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Webba-Creative-Technologies/vice@v3
+```
+
+That's it. The action installs VICE, audits your code, comments on every PR with the score and findings, and updates a `.github/vice-badge.json` file on your default branch so you can embed a live security badge in your README.
+
+### What it does
+
+- **On pull requests**: posts a comment with the security score, severity counts, and top findings grouped by severity. The same comment is updated on every commit, no spam.
+- **On push to default branch**: refreshes `.github/vice-badge.json` with the current score so your README badge stays up to date.
+- **Score gating**: fails the workflow if the score drops below `min-score` (default `70`). Catches regressions before they merge.
+- **Diff vs base**: when a badge already exists on the base branch, the PR comment shows the score delta (e.g. `87 (-5 vs base)`).
+
+### Permissions
+
+The workflow needs two permissions:
+
+- `contents: write` — to commit the badge file on push events
+- `pull-requests: write` — to post and update PR comments
+
+### Inputs
+
+| Input | Description | Default |
+|---|---|---|
+| `path` | Project path to audit | `.` |
+| `min-score` | Minimum score required to pass (0-100) | `70` |
+| `fail-on-score` | Fail the workflow if score is below `min-score` | `true` |
+| `comment-pr` | Post a comment on pull requests | `true` |
+| `update-badge` | Update the security badge file on push | `true` |
+| `badge-path` | Path to the badge JSON file | `.github/vice-badge.json` |
+| `github-token` | Token used to post comments and commit the badge | `${{ github.token }}` |
+
+### Outputs
+
+| Output | Description |
+|---|---|
+| `score` | Security score from 0 to 100 |
+| `grade` | Grade from A to F |
+| `total-findings` | Total number of findings |
+| `critical-findings` | Number of critical findings |
+| `high-findings` | Number of high severity findings |
+| `report-path` | Absolute path to the JSON report file |
+
+You can chain these in subsequent steps via `${{ steps.<id>.outputs.score }}` if you give the step an `id`.
+
+### Security badge
+
+After the first push to your default branch, the action commits `.github/vice-badge.json` to your repo. Add this snippet to your README to display a live security badge:
+
+```markdown
+![VICE Security](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/USERNAME/REPO/main/.github/vice-badge.json)
+```
+
+Replace `USERNAME/REPO` with your repo path. The badge updates automatically on every push to your default branch.
+
+### Pinning a version
+
+You can pin the action to a specific version for reproducible builds:
+
+```yaml
+- uses: Webba-Creative-Technologies/vice@v3.1.0   # exact version
+- uses: Webba-Creative-Technologies/vice@v3       # latest 3.x.x
+```
+
+The action version always matches the CLI version, so pinning gives you both at once.
 
 <br>
 

@@ -52,7 +52,7 @@ export async function auditAuth(projectPath, spinner, isIgnored = () => false) {
 
     if (/cors\(|Access-Control-Allow-Origin|allowedOrigins/i.test(content)) {
       hasCors = true;
-      if (/origin:\s*['"]?\*['"]?|Access-Control-Allow-Origin.*\*/i.test(content)) {
+      if (!isIgnored(rel) && /origin:\s*['"]?\*['"]?|Access-Control-Allow-Origin.*\*/i.test(content)) {
         addFinding('HIGH', 'Auth & Middleware', `CORS wildcard origin:'*' in ${rel}`, 'Allowing all origins lets any website call your API with user cookies', `Replace with a whitelist:\n  origin: ['https://your-domain.com']`);
       }
     }

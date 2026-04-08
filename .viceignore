@@ -1,0 +1,10 @@
+# VICE — self-audit ignore patterns
+# These files contain VICE's own pattern definitions and test payloads,
+# which are flagged as findings when VICE scans itself. Excluded to keep
+# the dogfooding score representative of real issues only.
+
+scan.js
+src/local/code-vulnerabilities.js
+src/local/auth.js
+src/local/secrets.js
+src/utils/patterns.js
