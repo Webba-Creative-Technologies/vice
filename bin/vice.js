@@ -25,6 +25,7 @@ import { calculateScore, severityColor } from '../src/core/score.js';
 import { printReport } from '../src/core/reporter/console.js';
 import { exportJson } from '../src/core/reporter/json.js';
 import { exportHtml } from '../src/core/reporter/html.js';
+import { buildSarif } from '../src/core/reporter/sarif.js';
 import { writeBadgeFile, readReportFile, findLatestReport } from '../src/core/badge.js';
 
 // ──────────── BANNER ────────────
@@ -324,6 +325,71 @@ async function runJsonAuditMode(target, minScore) {
   }
 }
 
+// ──────────── SARIF AUDIT MODE (for CI / GitHub code scanning) ────────────
+
+async function runSarifMode(target, minScore, outputPath) {
+  // Redirect all stdout writes to stderr during the audit so the final SARIF
+  // is the only thing written to stdout (when no outputPath is given).
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, encoding, cb) => process.stderr.write(chunk, encoding, cb);
+
+  const finish = (doc, exitCode = 0) => {
+    process.stdout.write = originalWrite;
+    const json = JSON.stringify(doc, null, 2) + '\n';
+    if (outputPath) {
+      try {
+        const resolvedOut = path.resolve(outputPath);
+        fs.mkdirSync(path.dirname(resolvedOut), { recursive: true });
+        fs.writeFileSync(resolvedOut, json);
+        process.stderr.write(`VICE: SARIF report written to ${resolvedOut}\n`);
+      } catch (err) {
+        process.stderr.write(`VICE: failed to write SARIF to ${outputPath}: ${err.message}\n`);
+        process.exit(1);
+      }
+    } else {
+      process.stdout.write(json);
+    }
+    process.exit(exitCode);
+  };
+
+  const finishError = (message, exitCode = 1) => {
+    // On error, produce a minimal but valid SARIF document so consumers don't choke.
+    const doc = buildSarif([], readPkgVersion());
+    process.stderr.write(`VICE: ${message}\n`);
+    finish(doc, exitCode);
+  };
+
+  try {
+    const accepted = await checkDisclaimer(true);
+    if (!accepted) {
+      finishError('Terms not accepted. Set VICE_ACCEPT_TERMS=1 to bypass.', 1);
+      return;
+    }
+
+    const resolved = path.resolve(target);
+    if (!fs.existsSync(resolved)) {
+      finishError(`Path not found: ${resolved}`, 1);
+      return;
+    }
+
+    clearFindings();
+    const allModules = LOCAL_MODULES.map(m => m.value);
+    await runLocalAudit(resolved, allModules);
+
+    const findings = getFindings();
+    const { score } = calculateScore();
+
+    // Best-effort: still save the JSON history locally
+    try { await exportJson(resolved, DATA_DIR); } catch {}
+
+    const sarif = buildSarif(findings, readPkgVersion());
+    const exitCode = (minScore !== null && score < minScore) ? 1 : 0;
+    finish(sarif, exitCode);
+  } catch (err) {
+    finishError(`${err.message}\n${err.stack}`, 1);
+  }
+}
+
 // ──────────── BADGE COMMAND ────────────
 
 async function runBadgeCommand(args) {
@@ -366,6 +432,21 @@ async function main() {
       const jsonMode = args.includes('--json');
       const ciMode = args.includes('--ci');
       const target = args[1] && !args[1].startsWith('--') ? args[1] : '.';
+
+      const formatIdx = args.indexOf('--format');
+      const formatValue = formatIdx !== -1 ? args[formatIdx + 1] : null;
+      const sarifMode = formatValue === 'sarif';
+
+      const outputIdx = args.indexOf('--output');
+      const outputPath = outputIdx !== -1 ? args[outputIdx + 1] : null;
+
+      // SARIF mode: clean stdout SARIF output for machine consumption / GitHub code scanning
+      if (sarifMode) {
+        const minIdx = args.indexOf('--min-score');
+        const minScore = minIdx !== -1 ? parseInt(args[minIdx + 1]) : (ciMode ? 70 : null);
+        await runSarifMode(target, minScore, outputPath);
+        return;
+      }
 
       // JSON mode: clean stdout output for machine consumption
       if (jsonMode) {
@@ -419,6 +500,8 @@ async function main() {
     console.log('    vice audit [path]                    Local audit (white-box, source code)');
     console.log('    vice audit [path] --ci               CI mode (exits 0 if score >= threshold)');
     console.log('    vice audit [path] --ci --json        Machine-readable JSON output to stdout');
+    console.log('    vice audit [path] --ci --format sarif');
+    console.log('         [--output results.sarif]        SARIF v2.1.0 output for GitHub code scanning');
     console.log('    vice audit . --ci --min-score 80');
     console.log('    vice badge --input <report.json>     Generate shields.io badge from a report');
     console.log('         [--output .github/vice-badge.json]');

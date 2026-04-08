@@ -30,6 +30,10 @@ inputs:
     description: 'Path to the badge JSON file (relative to repo root)'
     required: false
     default: '.github/vice-badge.json'
+  upload-sarif:
+    description: 'Upload SARIF report to GitHub Code Scanning (Security tab). Requires security-events: write permission.'
+    required: false
+    default: 'true'
   github-token:
     description: 'GitHub token used for posting PR comments and committing the badge'
     required: false
@@ -76,6 +80,23 @@ runs:
       id: set-outputs
       shell: bash
       run: node "${{ github.action_path }}/action/set-outputs.mjs" "${{ runner.temp }}/vice-results.json"
+
+    - name: Generate SARIF report
+      id: sarif
+      if: inputs.upload-sarif == 'true'
+      shell: bash
+      env:
+        VICE_ACCEPT_TERMS: '1'
+      continue-on-error: true
+      run: |
+        node "${{ github.action_path }}/bin/vice.js" audit "${{ inputs.path }}" --ci --format sarif --min-score 0 --output "${{ runner.temp }}/vice.sarif"
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: inputs.upload-sarif == 'true' && steps.sarif.outcome == 'success'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ runner.temp }}/vice.sarif
+        category: vice
 
     - name: Post pull request comment
       if: github.event_name == 'pull_request' && inputs.comment-pr == 'true'

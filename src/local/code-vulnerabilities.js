@@ -43,7 +43,7 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
       const key = `${ruleId}:${line}`;
       if (seen.has(key)) return;
       seen.add(key);
-      addFinding(severity, 'Code Vulnerabilities', title, detail, recommendation);
+      addFinding(severity, 'Code Vulnerabilities', title, detail, recommendation, { file: rel, line });
     };
 
     // SQL Injection

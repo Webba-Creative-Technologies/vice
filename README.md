@@ -72,6 +72,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  security-events: write
 
 jobs:
   vice:
@@ -87,15 +88,17 @@ That's it. The action installs VICE, audits your code, comments on every PR with
 
 - **On pull requests**: posts a comment with the security score, severity counts, and top findings grouped by severity. The same comment is updated on every commit, no spam.
 - **On push to default branch**: refreshes `.github/vice-badge.json` with the current score so your README badge stays up to date.
+- **SARIF integration**: uploads findings to GitHub Code Scanning so they appear in the Security tab and as inline annotations on the changed lines of pull requests.
 - **Score gating**: fails the workflow if the score drops below `min-score` (default `70`). Catches regressions before they merge.
 - **Diff vs base**: when a badge already exists on the base branch, the PR comment shows the score delta (e.g. `87 (-5 vs base)`).
 
 ### Permissions
 
-The workflow needs two permissions:
+The workflow needs three permissions:
 
 - `contents: write` — to commit the badge file on push events
 - `pull-requests: write` — to post and update PR comments
+- `security-events: write` — to upload SARIF findings to GitHub Code Scanning (Security tab)
 
 ### Inputs
 
@@ -106,6 +109,7 @@ The workflow needs two permissions:
 | `fail-on-score` | Fail the workflow if score is below `min-score` | `true` |
 | `comment-pr` | Post a comment on pull requests | `true` |
 | `update-badge` | Update the security badge file on push | `true` |
+| `upload-sarif` | Upload SARIF findings to GitHub Code Scanning | `true` |
 | `badge-path` | Path to the badge JSON file | `.github/vice-badge.json` |
 | `github-token` | Token used to post comments and commit the badge | `${{ github.token }}` |
 
@@ -131,6 +135,18 @@ After the first push to your default branch, the action commits `.github/vice-ba
 ```
 
 Replace `USERNAME/REPO` with your repo path. The badge updates automatically on every push to your default branch.
+
+### GitHub Code Scanning integration
+
+VICE uploads findings as SARIF (Static Analysis Results Interchange Format) to GitHub Code Scanning on every run. The findings appear in three places:
+
+- The repo's **Security tab** under "Code scanning alerts", alongside CodeQL and other scanners
+- **Inline annotations** on the changed lines of pull request diffs
+- The organization's **Security overview** for repos that enable it
+
+This requires the `security-events: write` permission in your workflow (already included in the quickstart above). For private repos, GitHub Advanced Security must be enabled. Public repos get this for free.
+
+You can disable SARIF uploads by setting `upload-sarif: false` in the action inputs if you only want PR comments.
 
 ### Pinning a version
 
