@@ -53,7 +53,7 @@ export async function auditAuth(projectPath, spinner, isIgnored = () => false) {
     if (/cors\(|Access-Control-Allow-Origin|allowedOrigins/i.test(content)) {
       hasCors = true;
       if (!isIgnored(rel) && /origin:\s*['"]?\*['"]?|Access-Control-Allow-Origin.*\*/i.test(content)) {
-        addFinding('HIGH', 'Auth & Middleware', `CORS wildcard origin:'*' in ${rel}`, 'Allowing all origins lets any website call your API with user cookies', `Replace with a whitelist:\n  origin: ['https://your-domain.com']`);
+        addFinding('HIGH', 'Auth & Middleware', `CORS wildcard origin:'*' in ${rel}`, 'Allowing all origins lets any website call your API with user cookies', `Replace with a whitelist:\n  origin: ['https://your-domain.com']`, { file: rel });
       }
     }
 
@@ -81,7 +81,8 @@ export async function auditAuth(projectPath, spinner, isIgnored = () => false) {
         if (/\s/.test(val)) continue;
         if (/^password$/i.test(val)) continue;
         if (/^[\p{Lu}][\p{Ll}]+$/u.test(val)) continue;
-        addFinding('CRITICAL', 'Auth & Middleware', `Hardcoded password in ${rel}`, 'A password is hardcoded in source code', 'Move to environment variables');
+        const pwLine = content.substring(0, pwMatch.index).split('\n').length;
+        addFinding('CRITICAL', 'Auth & Middleware', `Hardcoded password in ${rel}`, 'A password is hardcoded in source code', 'Move to environment variables', { file: rel, line: pwLine });
         break;
       }
     }
