@@ -1,0 +1,33 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  vice-audit:
+    name: VICE Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Dogfooding: badge disabled until self-scan false positives are fixed.
+      - name: Run VICE audit
+        uses: ./
+        with:
+          path: '.'
+          min-score: 0
+          fail-on-score: false
+          comment-pr: true
+          update-badge: false
