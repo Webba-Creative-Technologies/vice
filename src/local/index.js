@@ -3,6 +3,7 @@
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
+import { resolve } from 'path';
 import ora from 'ora';
 import chalk from 'chalk';
 import { loadViceignore } from '../utils/ignore.js';
@@ -25,6 +26,13 @@ export const LOCAL_MODULES = [
 ];
 
 export async function runLocalAudit(projectPath, selectedModules) {
+  const cwd = process.cwd();
+  const safePath = resolve(cwd, projectPath);
+  if (!safePath.startsWith(cwd)) {
+    throw new Error(`Path traversal detected: "${projectPath}" resolves outside the working directory`);
+  }
+  projectPath = safePath;
+
   const isIgnored = loadViceignore(projectPath);
   console.log('');
 

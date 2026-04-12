@@ -87,8 +87,11 @@ export async function auditSecrets(projectPath, spinner, isIgnored = () => false
           ? `Move to .env.local and use process.env.${pattern.name.toUpperCase().replace(/\s+/g, '_')}`
           : 'Verify this value should not be in environment variables';
 
+        const masked = match.length > 12
+          ? match.slice(0, 6) + '...' + match.slice(-4)
+          : '*'.repeat(match.length);
         const location = lineNum > 0 ? { file: relativePath, line: lineNum } : { file: relativePath };
-        addFinding(sev, 'Code Secrets', `${pattern.name} in ${relativePath}:${lineNum}`, `Value: ${match}`, fix, location);
+        addFinding(sev, 'Code Secrets', `${pattern.name} in ${relativePath}:${lineNum}`, `Value: ${masked}`, fix, location);
         found++;
       }
     }

@@ -65,16 +65,18 @@ runs:
     - name: Install VICE dependencies
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: npm install --omit=dev --omit=optional --no-audit --no-fund --silent
+      run: npm install --omit=dev --omit=optional --no-fund --silent
 
     - name: Run VICE audit
       id: scan
       shell: bash
       env:
         VICE_ACCEPT_TERMS: '1'
+        VICE_AUDIT_PATH: ${{ inputs.path }}
+        VICE_MIN_SCORE: ${{ inputs.min-score }}
       continue-on-error: true
       run: |
-        node "${{ github.action_path }}/bin/vice.js" audit "${{ inputs.path }}" --ci --json --min-score "${{ inputs.min-score }}" > "${{ runner.temp }}/vice-results.json"
+        node "${{ github.action_path }}/bin/vice.js" audit "$VICE_AUDIT_PATH" --ci --json --min-score "$VICE_MIN_SCORE" > "${{ runner.temp }}/vice-results.json"
 
     - name: Set action outputs
       id: set-outputs
@@ -87,9 +89,10 @@ runs:
       shell: bash
       env:
         VICE_ACCEPT_TERMS: '1'
+        VICE_AUDIT_PATH: ${{ inputs.path }}
       continue-on-error: true
       run: |
-        node "${{ github.action_path }}/bin/vice.js" audit "${{ inputs.path }}" --ci --format sarif --min-score 0 --output "${{ runner.temp }}/vice.sarif"
+        node "${{ github.action_path }}/bin/vice.js" audit "$VICE_AUDIT_PATH" --ci --format sarif --min-score 0 --output "${{ runner.temp }}/vice.sarif"
 
     - name: Upload SARIF to GitHub Code Scanning
       if: inputs.upload-sarif == 'true' && steps.sarif.outcome == 'success'

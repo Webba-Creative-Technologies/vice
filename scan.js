@@ -3,6 +3,7 @@ import ora from 'ora';
 import inquirer from 'inquirer';
 import puppeteer from 'puppeteer';
 import { getViceDataDir } from './src/utils/paths.js';
+import { SECRET_PATTERNS, IP_PATTERN, SECURITY_HEADERS, SENSITIVE_PATHS, LEAK_HEADERS } from './src/utils/patterns.js';
 
 // ─────────────────────────────────────────────
 // VICE - Vulnerability Inspector & Code Examiner
@@ -10,46 +11,8 @@ import { getViceDataDir } from './src/utils/paths.js';
 // Webba Creative Technologies (c) 2026
 // ─────────────────────────────────────────────
 
-const SENSITIVE_PATHS = [
-  '/.env', '/.env.local', '/.env.production', '/.env.development',
-  '/.git/config', '/.git/HEAD',
-  '/wp-config.php', '/config.json', '/package.json',
-  '/.DS_Store', '/robots.txt', '/sitemap.xml',
-  '/.htaccess', '/server.js', '/api/', '/.well-known/',
-  '/graphql', '/admin', '/debug', '/phpinfo.php',
-  '/_next/static/', '/static/js/',
-];
-
-const SECRET_PATTERNS = [
-  { name: 'Supabase URL',           regex: /https?:\/\/[a-z0-9\-]+\.supabase\.co/gi },
-  { name: 'Supabase Anon Key',      regex: /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g },
-  { name: 'Stripe Secret Key',      regex: /sk_(live|test)_[a-zA-Z0-9]{20,}/g },
-  { name: 'Stripe Publishable Key', regex: /pk_(live|test)_[a-zA-Z0-9]{20,}/g },
-  { name: 'AWS Access Key',         regex: /AKIA[0-9A-Z]{16}/g },
-  { name: 'AWS Secret Key',         regex: /(?:aws_secret|secret_key|secretAccessKey)[\s:="']+[a-zA-Z0-9\/+=]{30,}/gi },
-  { name: 'Firebase API Key',       regex: /AIza[0-9A-Za-z_-]{35}/g },
-  { name: 'Google OAuth',           regex: /[0-9]+-[a-z0-9_]{32}\.apps\.googleusercontent\.com/g },
-  { name: 'GitHub Token',           regex: /gh[pousr]_[A-Za-z0-9_]{36,}/g },
-  { name: 'Generic API Key',        regex: /(?:api[_-]?key|apikey|api_secret)[\s:="']+[a-zA-Z0-9_\-]{16,}/gi },
-  { name: 'Generic Secret',         regex: /(?:secret|passwd|pwd)[\s]*[=:][\s]*["'][a-zA-Z0-9_\-!@#$%^&*]{8,}["']/gi },
-  { name: 'Supabase Service Role', regex: /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]{50,}\.[a-zA-Z0-9_-]+/g },
-  { name: 'Private Key',            regex: /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/g },
-  { name: 'Bearer Token',           regex: /Bearer\s+[a-zA-Z0-9_\-\.]+/g },
-];
-
-const IP_PATTERN = /(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)(?::\d{2,5})?(?!\d)/g;
-
-const SECURITY_HEADERS = [
-  { name: 'Strict-Transport-Security', severity: 'ELEVEE' },
-  // Content-Security-Policy handled by CSP Bypass module (Scenario 8) — avoids double counting
-  // X-Frame-Options handled by Clickjacking module (Scenario 1) — avoids double counting
-  { name: 'X-Content-Type-Options',    severity: 'MOYENNE' },
-  { name: 'Referrer-Policy',           severity: 'FAIBLE' },
-  { name: 'Permissions-Policy',        severity: 'FAIBLE' },
-];
-
-// Server header handled by Stack Detection module — avoids double counting
-const LEAK_HEADERS = ['X-Powered-By', 'X-AspNet-Version', 'X-AspNetMvc-Version'];
+// SENSITIVE_PATHS, SECRET_PATTERNS, IP_PATTERN, SECURITY_HEADERS, LEAK_HEADERS
+// imported from src/utils/patterns.js
 
 const findings = [];
 const discoveredIps = new Set();
@@ -82,7 +45,7 @@ async function crawlAndExtract(baseUrl, spinner) {
 
   let browser;
   try {
-    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
   } catch (err) {
     addFinding('CRITIQUE', 'Crawl', 'Unable to launch browser', err.message, 'Verify that Puppeteer/Chromium is properly installed');
     return { scripts: [], html: '', pageUrls: [] };
@@ -1021,7 +984,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
   {
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
       const page = await browser.newPage();
 
       // Create a page that embeds the site in an iframe
@@ -1085,7 +1048,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
 
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
       const page = await browser.newPage();
 
       let xssFound = false;
@@ -1139,7 +1102,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
   {
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
       const page = await browser.newPage();
       await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 15000 });
 
@@ -1284,7 +1247,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
   {
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
       const page = await browser.newPage();
       await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 15000 });
 
@@ -1425,7 +1388,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
 async function auditLoginSecurity(baseUrl, spinner) {
   let browser;
   try {
-    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   } catch (err) {
     addFinding('INFO', 'Login Audit', 'Unable to launch browser', err.message, '');
     return;
@@ -2872,7 +2835,7 @@ async function auditWebsockets(baseUrl, jsContents, spinner) {
   // Test each WebSocket with Puppeteer
   let browser;
   try {
-    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   } catch {
     return;
   }
