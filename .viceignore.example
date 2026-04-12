@@ -1,0 +1,31 @@
+# .viceignore.example
+# Example .viceignore file for VICE
+# Copy this file to .viceignore and modify as needed
+
+# Ignore translation files
+**/i18n/**
+**/locales/**
+
+# Ignore a specific file
+src/config/ui-labels.ts
+
+# Ignore by pattern
+*.locale.*
+
+# Ignore test files
+**/*.test.js
+**/*.spec.js
+
+# Ignore build directories
+**/dist/**
+**/build/**
+
+# Ignore node_modules
+node_modules/
+
+# Ignore logs
+*.log
+
+# Ignore environment files (but not .env.example)
+.env
+!.env.example
