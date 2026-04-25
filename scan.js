@@ -1766,7 +1766,7 @@ async function auditLoginSecurity(baseUrl, spinner) {
         else if (/mysql|mariadb/i.test(combined)) { dbType = 'mysql'; sqlVulnerable = true; }
         else if (/sqlite/i.test(combined)) { dbType = 'sqlite'; sqlVulnerable = true; }
         else if (/ora-\d|oracle/i.test(combined)) { dbType = 'oracle'; sqlVulnerable = true; }
-        else if (/sql server|mssql|microsoft/i.test(combined)) { dbType = 'mssql'; sqlVulnerable = true; }
+        else if (/sql server|mssql|microsoft (sql|ole db|odbc)|sqlclient|system\.data\.sqlclient/i.test(combined)) { dbType = 'mssql'; sqlVulnerable = true; }
         else if (/sql|syntax|query|unterminated|unclosed/i.test(combined)) { sqlVulnerable = true; }
 
         if (sqlVulnerable) {
