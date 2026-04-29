@@ -37,11 +37,10 @@
   },
   "dependencies": {
     "chalk": "^5.3.0",
-    "cheerio": "^1.0.0",
     "inquirer": "^9.2.12",
     "ora": "^7.0.1"
   },
   "optionalDependencies": {
-    "puppeteer": "^23.11.1"
+    "puppeteer": "^24.0.0"
   }
 }
