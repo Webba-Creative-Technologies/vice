@@ -14,9 +14,12 @@ export async function auditEnvFiles(projectPath, spinner) {
   const gitignorePath = path.join(projectPath, '.gitignore');
 
   let gitignoreContent = '';
-  if (fs.existsSync(gitignorePath)) {
-    gitignoreContent = fs.readFileSync(gitignorePath, 'utf-8');
-  } else {
+  let gitignoreFound = false;
+  try {
+    gitignoreContent = await fs.promises.readFile(gitignorePath, 'utf-8');
+    gitignoreFound = true;
+  } catch {}
+  if (!gitignoreFound) {
     addFinding('HIGH', 'Env Files', 'No .gitignore found', 'Without .gitignore, sensitive files may be committed by mistake', 'Create a .gitignore and add: .env*\nnode_modules/\ndist/');
   }
 
@@ -27,9 +30,10 @@ export async function auditEnvFiles(projectPath, spinner) {
 
   for (const envFile of envFiles) {
     const envPath = path.join(projectPath, envFile);
-    if (!fs.existsSync(envPath)) continue;
-
-    const content = fs.readFileSync(envPath, 'utf-8');
+    let content;
+    try {
+      content = await fs.promises.readFile(envPath, 'utf-8');
+    } catch { continue; }
     const lines = content.split('\n');
 
     for (let i = 0; i < lines.length; i++) {

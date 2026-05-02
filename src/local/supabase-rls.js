@@ -29,15 +29,16 @@ export async function auditSupabaseRls(projectPath, spinner) {
   }
 
   const sqlFiles = [];
-  function findSql(dir) {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+  async function findSql(dir) {
+    let entries;
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) findSql(fullPath);
+      if (entry.isDirectory()) await findSql(fullPath);
       else if (entry.name.endsWith('.sql')) sqlFiles.push(fullPath);
     }
   }
-  findSql(migrationDir);
+  await findSql(migrationDir);
 
   if (sqlFiles.length === 0) {
     addFinding('INFO', 'Supabase RLS', 'No SQL files found in migrations', '', '');
@@ -51,7 +52,7 @@ export async function auditSupabaseRls(projectPath, spinner) {
   const tablesWithPolicies = new Set();
 
   for (const filePath of sqlFiles) {
-    const content = fs.readFileSync(filePath, 'utf-8');
+    const content = await fs.promises.readFile(filePath, 'utf-8');
     const rel = path.relative(projectPath, filePath);
 
     const createTableRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?["']?(\w+)["']?/gi;

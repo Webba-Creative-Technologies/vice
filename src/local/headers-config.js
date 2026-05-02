@@ -29,8 +29,8 @@ export async function auditHeadersConfig(projectPath, spinner) {
     ];
 
     for (const filePath of searchPaths) {
-      if (!fs.existsSync(filePath)) continue;
-      const content = fs.readFileSync(filePath, 'utf-8');
+      let content;
+      try { content = await fs.promises.readFile(filePath, 'utf-8'); } catch { continue; }
       const rel = path.relative(projectPath, filePath);
 
       if (/Content-Security-Policy|contentSecurityPolicy|csp/i.test(content)) cspFound = true;
@@ -53,8 +53,8 @@ export async function auditHeadersConfig(projectPath, spinner) {
   // .htaccess files (Apache)
   const htaccessPaths = ['', 'public', 'dist'].map(d => path.join(projectPath, d, '.htaccess'));
   for (const filePath of htaccessPaths) {
-    if (!fs.existsSync(filePath)) continue;
-    const content = fs.readFileSync(filePath, 'utf-8');
+    let content;
+    try { content = await fs.promises.readFile(filePath, 'utf-8'); } catch { continue; }
     if (/Header\s+(set|always\s+set)\s+Content-Security-Policy/i.test(content)) cspFound = true;
     if (/Header\s+(set|always\s+set)\s+Strict-Transport-Security/i.test(content)) hstsFound = true;
   }
@@ -62,8 +62,8 @@ export async function auditHeadersConfig(projectPath, spinner) {
   // <meta http-equiv> in HTML files
   const htmlPaths = ['', 'public', 'dist', 'src'].map(d => path.join(projectPath, d, 'index.html'));
   for (const filePath of htmlPaths) {
-    if (!fs.existsSync(filePath)) continue;
-    const content = fs.readFileSync(filePath, 'utf-8');
+    let content;
+    try { content = await fs.promises.readFile(filePath, 'utf-8'); } catch { continue; }
     if (/<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["']/i.test(content)) cspFound = true;
     if (/<meta\s+http-equiv\s*=\s*["']Strict-Transport-Security["']/i.test(content)) hstsFound = true;
   }
