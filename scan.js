@@ -10,11 +10,14 @@ import { getViceDataDir } from './src/utils/paths.js';
 // Webba Creative Technologies (c) 2026
 // ─────────────────────────────────────────────
 
+// Paths that, if reachable, indicate a misconfiguration or leak.
+// robots.txt and sitemap.xml are intentionally PUBLIC and not included here -
+// they're consumed for path-discovery in the crawl phase instead.
 const SENSITIVE_PATHS = [
   '/.env', '/.env.local', '/.env.production', '/.env.development',
   '/.git/config', '/.git/HEAD',
   '/wp-config.php', '/config.json', '/package.json',
-  '/.DS_Store', '/robots.txt', '/sitemap.xml',
+  '/.DS_Store',
   '/.htaccess', '/server.js', '/api/', '/.well-known/',
   '/graphql', '/admin', '/debug', '/phpinfo.php',
   '/_next/static/', '/static/js/',
@@ -54,6 +57,49 @@ const LEAK_HEADERS = ['X-Powered-By', 'X-AspNet-Version', 'X-AspNetMvc-Version']
 const findings = [];
 const discoveredIps = new Set();
 
+// Authenticated crawl context (set from CLI flags by main()).
+// Applied to Puppeteer pages so the crawl can follow links behind a login.
+// Note: NOT applied to safeFetch - public-access tests must stay unauthenticated.
+let AUTH_CONTEXT = null;
+
+async function applyAuth(page, baseUrl) {
+  if (!AUTH_CONTEXT) return;
+  try {
+    if (Array.isArray(AUTH_CONTEXT.cookies) && AUTH_CONTEXT.cookies.length) {
+      const url = baseUrl || 'http://localhost/';
+      const cookies = AUTH_CONTEXT.cookies.map(c => ({ name: c.name, value: c.value, url }));
+      await page.setCookie(...cookies);
+    }
+    if (AUTH_CONTEXT.headers && Object.keys(AUTH_CONTEXT.headers).length) {
+      await page.setExtraHTTPHeaders(AUTH_CONTEXT.headers);
+    }
+  } catch {}
+}
+
+function parseAuthString(cookieStr, headerStr) {
+  const ctx = { cookies: [], headers: {} };
+  if (cookieStr) {
+    for (const pair of String(cookieStr).split(';')) {
+      const trimmed = pair.trim();
+      const eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        ctx.cookies.push({ name: trimmed.substring(0, eq).trim(), value: trimmed.substring(eq + 1).trim() });
+      }
+    }
+  }
+  if (headerStr) {
+    for (const h of String(headerStr).split(/\n|\|/)) {
+      const colon = h.indexOf(':');
+      if (colon > 0) {
+        const name = h.substring(0, colon).trim();
+        const value = h.substring(colon + 1).trim();
+        if (name && value) ctx.headers[name] = value;
+      }
+    }
+  }
+  return (ctx.cookies.length || Object.keys(ctx.headers).length) ? ctx : null;
+}
+
 function addFinding(severity, module, title, detail, recommendation) {
   findings.push({ severity, module, title, detail, recommendation });
 }
@@ -90,6 +136,7 @@ async function crawlAndExtract(baseUrl, spinner) {
 
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+  await applyAuth(page, baseUrl);
 
   // Intercept all JS requests loaded by the browser
   const scriptUrls = new Set();
@@ -148,6 +195,113 @@ async function crawlAndExtract(baseUrl, spinner) {
   });
   scriptContents.push(...inlineScripts);
 
+  // ── Storage audit: localStorage / sessionStorage ──
+  // Tokens kept here are accessible to any script on the page (XSS theft vector).
+  spinner.text = 'Auditing localStorage / sessionStorage...';
+  try {
+    const storage = await page.evaluate(() => {
+      const dump = (s) => {
+        const out = {};
+        for (let i = 0; i < s.length; i++) {
+          const k = s.key(i);
+          out[k] = s.getItem(k);
+        }
+        return out;
+      };
+      return { local: dump(localStorage), session: dump(sessionStorage) };
+    });
+
+    for (const [where, items] of [['localStorage', storage.local], ['sessionStorage', storage.session]]) {
+      for (const [key, value] of Object.entries(items || {})) {
+        if (!value || typeof value !== 'string' || value.length < 20) continue;
+        // JWT-shaped value
+        const looksLikeJwt = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
+        // Or key name suggests an auth token
+        const tokenishKey = /token|jwt|access|refresh|bearer|auth|session|sid|api[_-]?key/i.test(key);
+        if (!looksLikeJwt && !tokenishKey) continue;
+        addFinding('ELEVEE', 'Storage Security',
+          `Auth token in ${where}: "${key}"`,
+          `Value: ${value.substring(0, 80)}${value.length > 80 ? '...' : ''}\nTokens kept in ${where} are readable by any script on the page. An XSS will exfiltrate them.`,
+          'Store auth tokens in HttpOnly cookies set by the server. Cookies with HttpOnly + Secure + SameSite=Strict cannot be read by JS.');
+      }
+    }
+    // Add storage content to scripts for later secret-pattern matching
+    scriptContents.push('LOCALSTORAGE: ' + JSON.stringify(storage.local));
+    scriptContents.push('SESSIONSTORAGE: ' + JSON.stringify(storage.session));
+  } catch {}
+
+  // ── Subresource Integrity check on external scripts ──
+  // Analytics/tracking CDNs can't realistically use SRI: they rotate their
+  // bundle content (sometimes daily) and any pinned hash would break the
+  // tag on the next deploy. Reported at FAIBLE so users see them but they
+  // don't get blamed for an impossible mitigation.
+  const ANALYTICS_CDN_HOSTS = [
+    'clarity.ms', 'googletagmanager.com', 'google-analytics.com', 'gtag',
+    'hotjar.com', 'fullstory.com', 'segment.com', 'segment.io', 'amplitude.com',
+    'mixpanel.com', 'intercom.io', 'crisp.chat', 'tawk.to', 'plausible.io',
+    'matomo.cloud', 'fathom.com', 'usefathom.com', 'simpleanalyticscdn.com',
+    'cdn.heapanalytics.com', 'static.heapanalytics.com', 'js.stripe.com',
+    'connect.facebook.net', 'snap.licdn.com', 'sc-static.net', 'ads.linkedin.com',
+    'static.ads-twitter.com', 'analytics.tiktok.com', 'cdn.cookielaw.org',
+  ];
+  spinner.text = 'Checking Subresource Integrity (SRI) on external scripts...';
+  try {
+    const externalScripts = await page.evaluate((origin) => {
+      return [...document.querySelectorAll('script[src]')].map(s => ({
+        src: s.src,
+        integrity: s.integrity || '',
+      })).filter(s => {
+        try { return new URL(s.src).origin !== origin; } catch { return false; }
+      });
+    }, new URL(baseUrl).origin);
+
+    for (const script of externalScripts) {
+      if (script.integrity) continue;
+      let host = '';
+      try { host = new URL(script.src).hostname; } catch {}
+      const isAnalytics = ANALYTICS_CDN_HOSTS.some(d => host === d || host.endsWith('.' + d) || host.includes(d));
+
+      if (isAnalytics) {
+        addFinding('FAIBLE', 'SRI',
+          `Analytics script without integrity: ${script.src}`,
+          'Tracking and analytics scripts rotate their bundle content frequently, so SRI cannot be applied in practice. Listed for visibility - verify you intend to load this third-party script and that it is required (privacy / GDPR / page weight).',
+          'For analytics scripts, SRI is impractical. Mitigation alternatives: load via a tag manager you control, self-host the script, or use a strict CSP (script-src) that only allows known analytics domains.');
+        continue;
+      }
+
+      addFinding('MOYENNE', 'SRI',
+        `External script without integrity: ${script.src}`,
+        'If the CDN or third-party host is compromised, malicious code runs without warning. SRI lets the browser refuse altered files.',
+        `Add integrity="sha384-..." to the <script> tag. Generate the hash with:\n  curl -s ${script.src} | openssl dgst -sha384 -binary | openssl base64 -A\nAlso add crossorigin="anonymous".`);
+    }
+  } catch {}
+
+  // ── Mixed content: HTTP resources on HTTPS page ──
+  if (new URL(baseUrl).protocol === 'https:') {
+    spinner.text = 'Checking for mixed content (HTTP on HTTPS page)...';
+    try {
+      const mixedResources = await page.evaluate(() => {
+        const resources = [];
+        document.querySelectorAll('script[src], link[href], img[src], iframe[src]').forEach(el => {
+          const url = el.src || el.href;
+          if (url && url.startsWith('http://') && !url.startsWith('http://localhost') && !url.startsWith('http://127.')) {
+            resources.push({ tag: el.tagName.toLowerCase(), url });
+          }
+        });
+        return resources;
+      });
+
+      if (mixedResources.length > 0) {
+        const list = mixedResources.slice(0, 10).map(r => `<${r.tag}> ${r.url}`).join('\n');
+        const sev = mixedResources.some(r => r.tag === 'script' || r.tag === 'iframe') ? 'ELEVEE' : 'MOYENNE';
+        addFinding(sev, 'Mixed Content',
+          `${mixedResources.length} HTTP resource(s) loaded on HTTPS page`,
+          `${list}${mixedResources.length > 10 ? `\n...and ${mixedResources.length - 10} more` : ''}\nBrowsers block scripts/iframes loaded over HTTP from HTTPS pages, but passive resources (images) may still be downgraded.`,
+          'Use https:// for all resource URLs, or use protocol-relative URLs (//cdn.example.com/file.js).');
+      }
+    } catch {}
+  }
+
   // Extract internal links
   const pageUrls = await page.evaluate((origin) => {
     return [...document.querySelectorAll('a[href]')]
@@ -169,8 +323,49 @@ async function crawlAndExtract(baseUrl, spinner) {
     }
   }
 
-  // Crawl a few internal pages for more coverage
-  const subPages = [...new Set(pageUrls)].slice(0, 5);
+  // Discover additional routes from robots.txt (often reveals admin/internal paths)
+  const origin = new URL(baseUrl).origin;
+  const discoveredPaths = new Set();
+  spinner.text = 'Fetching robots.txt for path discovery...';
+  try {
+    const robotsRes = await safeFetch(`${origin}/robots.txt`);
+    if (robotsRes && robotsRes.status === 200) {
+      const robotsTxt = await robotsRes.text();
+      // Parse Disallow + Allow + Sitemap entries
+      for (const line of robotsTxt.split('\n')) {
+        const dm = line.match(/^\s*(?:Disallow|Allow):\s*(\S+)/i);
+        if (dm) {
+          const p = dm[1].trim();
+          if (p && p !== '/' && !p.startsWith('#')) discoveredPaths.add(p);
+        }
+      }
+    }
+  } catch {}
+
+  // Sitemap.xml: extract <loc> URLs
+  spinner.text = 'Fetching sitemap.xml for path discovery...';
+  try {
+    const sitemapRes = await safeFetch(`${origin}/sitemap.xml`);
+    if (sitemapRes && sitemapRes.status === 200) {
+      const sitemapTxt = await sitemapRes.text();
+      const locs = [...sitemapTxt.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map(m => m[1]);
+      for (const loc of locs) {
+        try {
+          const u = new URL(loc);
+          if (u.origin === origin && u.pathname && u.pathname !== '/') {
+            discoveredPaths.add(u.pathname);
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  // Crawl a few internal pages for more coverage:
+  // 1) sub-pages found in <a> links
+  // 2) paths discovered from robots.txt / sitemap.xml
+  const linkPages = [...new Set(pageUrls)].slice(0, 5);
+  const robotsPages = [...discoveredPaths].slice(0, 5).map(p => origin + (p.startsWith('/') ? p : '/' + p));
+  const subPages = [...new Set([...linkPages, ...robotsPages])];
   if (subPages.length > 0) {
     spinner.text = `Crawling ${subPages.length} internal pages...`;
     for (const subUrl of subPages) {
@@ -284,25 +479,25 @@ function analyzeScripts(jsContents, spinner) {
         // Ignore IPs that look like version numbers
         if (/^\d+\.\d+\.\d+$/.test(ip)) continue;
 
-        // Ignore IPs with small octets everywhere (often false positives: dates, data, IDs)
-        // A real server IP generally has at least one octet > 40
+        // Filter out sequences that match the IP shape but are clearly not IPs:
+        // - all 4 octets small (< 50) is typical of versions, hashes, IDs, coords
+        // - 3+ octets < 30 is too suspicious to call an IP
         const maxOctet = Math.max(...octets);
-        if (maxOctet < 40) continue;
+        if (maxOctet < 50) continue;
+        const smallOctets = octets.filter(o => o < 30).length;
+        if (smallOctets >= 3) continue;
 
-        // Verify that the IP appears in a network context (URL, host, connect, fetch, etc.)
-        // and not just as random data in the DOM
+        // Require a network context (URL, host, connect, fetch, etc.) to emit a finding.
+        // Without context the match is almost certainly a coincidence on a numeric ID.
         const ipEscaped = ipBase.replace(/\./g, '\\.');
         const contextRegex = new RegExp(`(?:https?://|host|url|server|api|endpoint|connect|fetch|proxy|backend|ws://|wss://|ip|address|remote)[^\\n]{0,30}${ipEscaped}|${ipEscaped}[^\\n]{0,10}(?::\\d{2,5})`, 'i');
         const hasNetworkContext = contextRegex.test(js);
+        if (!hasNetworkContext) continue;
 
         if (!ipFound.has(ip)) {
           ipFound.add(ip);
-          if (hasNetworkContext) {
-            discoveredIps.add(ipBase);
-            addFinding('ELEVEE', 'Exposed IP', 'Server IP address detected', `IP found in a network context: ${ip}`, 'Use a domain name or a reverse proxy to hide the server IP');
-          } else {
-            addFinding('INFO', 'Exposed IP', `IP address detected (uncertain context)`, `IP found in code: ${ip} — probably not a server IP (no network context)`, '');
-          }
+          discoveredIps.add(ipBase);
+          addFinding('ELEVEE', 'Exposed IP', 'Server IP address detected', `IP found in a network context: ${ip}`, 'Use a domain name or a reverse proxy to hide the server IP');
         }
       }
     }
@@ -408,20 +603,8 @@ async function checkHeaders(baseUrl, spinner) {
     }
   }
 
-  // Check HTTP -> HTTPS redirect
-  if (baseUrl.startsWith('https://')) {
-    const httpUrl = baseUrl.replace('https://', 'http://');
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
-      const httpRes = await fetch(httpUrl, { signal: controller.signal, redirect: 'manual' });
-      clearTimeout(timeout);
-      const location = httpRes.headers.get('location') || '';
-      if (httpRes.status < 300 || httpRes.status >= 400 || !location.startsWith('https')) {
-        addFinding('MOYENNE', 'HTTPS', 'No HTTP to HTTPS redirect', `${httpUrl} does not redirect to HTTPS`, 'Configure a 301 redirect from HTTP to HTTPS');
-      }
-    } catch {}
-  }
+  // HTTP -> HTTPS redirect check is handled by the SSL/TLS scenario in
+  // auditAttackScenarios (scenario 6) - avoid double-flagging the same issue.
 
   // Check cookies
   const setCookie = headers.get('set-cookie');
@@ -1762,12 +1945,13 @@ async function auditLoginSecurity(baseUrl, spinner) {
 
         // Exposed SQL error
         const combined = result.responseText + result.pageContent;
-        if (/postgresql|pg_|postgres/i.test(combined)) { dbType = 'postgresql'; sqlVulnerable = true; }
-        else if (/mysql|mariadb/i.test(combined)) { dbType = 'mysql'; sqlVulnerable = true; }
-        else if (/sqlite/i.test(combined)) { dbType = 'sqlite'; sqlVulnerable = true; }
-        else if (/ora-\d|oracle/i.test(combined)) { dbType = 'oracle'; sqlVulnerable = true; }
-        else if (/sql server|mssql|microsoft (sql|ole db|odbc)|sqlclient|system\.data\.sqlclient/i.test(combined)) { dbType = 'mssql'; sqlVulnerable = true; }
-        else if (/sql|syntax|query|unterminated|unclosed/i.test(combined)) { sqlVulnerable = true; }
+        // Match actual SQL error output, not just tech-stack mentions of the DB name
+        if (/(?:pq:\s+ERROR|ERROR:.*?at character\s+\d+|LINE\s+\d+:\s|unterminated quoted string at or near|relation\s+"[^"]+"\s+does not exist|column\s+"[^"]+"\s+does not exist|syntax error at or near\s+")/i.test(combined)) { dbType = 'postgresql'; sqlVulnerable = true; }
+        else if (/(?:You have an error in your SQL syntax|Warning:\s+mysqli?_|near\s+'[^']*'\s+at line\s+\d+|Unknown column\s+'[^']+'|MySQLSyntaxErrorException|MariaDB server version)/i.test(combined)) { dbType = 'mysql'; sqlVulnerable = true; }
+        else if (/(?:sqlite3?\.OperationalError|near\s+"[^"]+":\s+syntax error|unrecognized token:|no such table:|no such column:)/i.test(combined)) { dbType = 'sqlite'; sqlVulnerable = true; }
+        else if (/ORA-\d{5}/i.test(combined)) { dbType = 'oracle'; sqlVulnerable = true; }
+        else if (/(?:sql server|mssql|microsoft (?:sql|ole db|odbc)|sqlclient|system\.data\.sqlclient)/i.test(combined)) { dbType = 'mssql'; sqlVulnerable = true; }
+        else if (/(?:unterminated quoted string|unclosed quotation mark|syntax error\s+(?:near|at line|at end of input)|SQL syntax;\s+check the manual|SQLSTATE\[\d+\])/i.test(combined)) { sqlVulnerable = true; }
 
         if (sqlVulnerable) {
           addFinding('CRITIQUE', 'SQL Injection', `SQL injection confirmed — database: ${dbType}`, `Payload: ${payload} (${name})\nThe server exposes an SQL error. The detected DB type allows crafting specific payloads.`, 'Use prepared statements. Disable error display in production.');
@@ -2076,10 +2260,10 @@ const STACK_SIGNATURES = {
   // Frontend frameworks
   'Next.js':       { html: [/__next/i, /next\/static/i, /_next\/data/i], headers: ['x-nextjs-cache', 'x-nextjs-matched-path'], js: [/__NEXT_DATA__/] },
   'Nuxt':          { html: [/__nuxt/i, /_nuxt\//i, /nuxt\//i], headers: ['x-powered-by:nuxt'], js: [/__NUXT__/, /nuxtApp/] },
-  'React':         { html: [/react/i, /__react/i], headers: [], js: [/react\.development/, /react-dom/, /__REACT_DEVTOOLS/] },
-  'Vue.js':        { html: [/vue\.js/i, /app\.vue/i, /v-if=/, /v-for=/], headers: [], js: [/Vue\.version/, /__VUE__/, /vue\.runtime/] },
-  'Angular':       { html: [/ng-version/, /ng-app/, /angular/i], headers: [], js: [/angular\.module/, /@angular\/core/] },
-  'Svelte':        { html: [/svelte/i, /__svelte/], headers: [], js: [/svelte\/internal/] },
+  'React':         { html: [/data-reactroot/, /data-reactid/, /__react/i], headers: [], js: [/react\.development/, /react-dom/, /__REACT_DEVTOOLS/] },
+  'Vue.js':        { html: [/vue\.js/i, /app\.vue/i, /\sv-if=["']/, /\sv-for=["']/, /data-v-app/], headers: [], js: [/Vue\.version/, /__VUE__/, /vue\.runtime/] },
+  'Angular':       { html: [/ng-version=["']/, /ng-app=["']/, /_ngcontent-/], headers: [], js: [/angular\.module/, /@angular\/core/] },
+  'Svelte':        { html: [/__svelte/, /class="s-[A-Za-z0-9]+/], headers: [], js: [/svelte\/internal/] },
   'Gatsby':        { html: [/gatsby/i, /___gatsby/], headers: ['x-gatsby-cache'], js: [/__gatsby/] },
   'Remix':         { html: [/remix/i, /__remix/], headers: [], js: [/__remixManifest/] },
   'Astro':         { html: [/astro/i, /astro-island/], headers: [], js: [/astro/] },
@@ -2087,7 +2271,7 @@ const STACK_SIGNATURES = {
   // CMS
   'WordPress':     { html: [/wp-content/i, /wp-includes/i, /wp-json/i], headers: ['x-powered-by:php', 'link:.*wp-json'], js: [/wp\.customize/] },
   'Shopify':       { html: [/shopify/i, /cdn\.shopify/i], headers: ['x-shopid', 'x-shopify-stage'], js: [/Shopify\./] },
-  'Webflow':       { html: [/webflow/i, /wf-/], headers: [], js: [/Webflow/] },
+  'Webflow':       { html: [/data-wf-(?:page|site)/i, /webflow\.com/i], headers: [], js: [/Webflow\.require/] },
 
   // Backend
   'Express':       { html: [], headers: ['x-powered-by:express'], js: [] },
@@ -2130,7 +2314,7 @@ const STACK_SIGNATURES = {
   'Turbopack':     { html: [], headers: [], js: [/turbopack/] },
 
   // UI Libraries
-  'Tailwind CSS':  { html: [/tw-/, /tailwind/i], headers: [], js: [] },
+  'Tailwind CSS':  { html: [/--tw-[a-z]/, /\btailwind(?:css)?\b/i], headers: [], js: [/\btailwindcss\b/] },
   'Bootstrap':     { html: [/bootstrap/i, /class=".*btn btn-/], headers: [], js: [/bootstrap/] },
   'Material UI':   { html: [/mui-/, /MuiButton/], headers: [], js: [/@mui/] },
   'Shadcn/UI':     { html: [/radix-/, /data-radix/], headers: [], js: [/@radix-ui/] },
@@ -2217,8 +2401,13 @@ async function detectStack(baseUrl, jsContents, spinner) {
     'UI': ['Tailwind CSS', 'Bootstrap', 'Material UI', 'Shadcn/UI'],
   };
 
-  // Technologies that should be hidden (reveal the backend/server stack)
-  const shouldHide = new Set(['Nginx', 'Apache', 'Caddy', 'Express', 'PHP', 'Django', 'Ruby on Rails', 'Laravel', 'OVHcloud', 'Heroku', 'AWS', 'Google Cloud', 'Nuxt', 'Next.js', 'WordPress']);
+  // Tech where the version exposed in headers reveals exploitable CVEs.
+  // These deserve a real finding (frameworks, CMS, runtime versions).
+  const exposedFrameworks = new Set(['Express', 'PHP', 'Django', 'Ruby on Rails', 'Laravel', 'Nuxt', 'Next.js', 'WordPress']);
+  // Hosting providers and HTTP servers: their presence is public/standard.
+  // Worth knowing about but not actionable as MEDIUM severity.
+  const hostingProviders = new Set(['Nginx', 'Apache', 'Caddy', 'OVHcloud', 'Heroku', 'AWS', 'Google Cloud', 'Vercel', 'Netlify', 'Cloudflare']);
+  const shouldHide = new Set([...exposedFrameworks, ...hostingProviders]);
 
   // Display by category
   let fullStackDetail = '';
@@ -2255,7 +2444,11 @@ async function detectStack(baseUrl, jsContents, spinner) {
           'WordPress': 'Use a security plugin to hide wp-content and wp-includes paths',
         };
 
-        addFinding('MOYENNE', 'Stack Detection', `${techName} detectable via HTTP headers`, `${headerSources.join('\n')}\nAn attacker can target known CVEs for ${techName}.`, how[techName] || `Remove or hide headers that reveal ${techName}`);
+        const sev = exposedFrameworks.has(techName) ? 'MOYENNE' : 'INFO';
+        const cveLine = exposedFrameworks.has(techName)
+          ? `\nAn attacker can target known CVEs for ${techName}.`
+          : `\nHosting provider/server is identifiable - low impact, but minor info disclosure.`;
+        addFinding(sev, 'Stack Detection', `${techName} detectable via HTTP headers`, `${headerSources.join('\n')}${cveLine}`, how[techName] || `Remove or hide headers that reveal ${techName}`);
       }
 
       if (jsSources.length > 0 && !headerSources.length) {
@@ -2319,18 +2512,47 @@ async function scanSubdomains(baseUrl, spinner) {
     'n8n', 'strapi', 'directus', 'supabase', 'studio',
   ];
 
+  // Build the candidate set from two sources:
+  // 1. Certificate Transparency via crt.sh (passive, often catches non-obvious subdomains)
+  // 2. Common-prefix bruteforce (catches subdomains that haven't issued certs)
+  const candidates = new Set(commonSubs.map(s => `${s}.${baseDomain}`));
+  let crtCount = 0;
+
+  spinner.text = `Querying crt.sh for ${baseDomain}...`;
+  try {
+    const crtRes = await safeFetch(`https://crt.sh/?q=%25.${encodeURIComponent(baseDomain)}&output=json`);
+    if (crtRes && crtRes.status === 200) {
+      const data = await crtRes.json();
+      if (Array.isArray(data)) {
+        for (const entry of data) {
+          if (!entry.name_value) continue;
+          for (const name of String(entry.name_value).split('\n')) {
+            const clean = name.trim().toLowerCase().replace(/^\*\./, '');
+            if (clean === baseDomain) continue;
+            if (clean.includes(' ') || !clean.endsWith('.' + baseDomain)) continue;
+            if (!candidates.has(clean)) {
+              candidates.add(clean);
+              crtCount++;
+            }
+            if (candidates.size >= 300) break; // safety cap on huge cert sets
+          }
+          if (candidates.size >= 300) break;
+        }
+      }
+    }
+  } catch {}
+
   const dns = await import('dns');
   const { promisify } = await import('util');
   const resolve4 = promisify(dns.default.resolve4);
 
   const foundSubs = [];
   let checked = 0;
+  const total = candidates.size;
 
-  for (const sub of commonSubs) {
+  for (const subdomain of candidates) {
     checked++;
-    if (checked % 10 === 0) spinner.text = `Subdomain scan [${checked}/${commonSubs.length}] ${sub}.${baseDomain}...`;
-
-    const subdomain = `${sub}.${baseDomain}`;
+    if (checked % 10 === 0) spinner.text = `Subdomain DNS check [${checked}/${total}] ${subdomain}...`;
     try {
       const ips = await resolve4(subdomain);
       if (ips && ips.length > 0) {
@@ -2340,7 +2562,7 @@ async function scanSubdomains(baseUrl, spinner) {
   }
 
   if (foundSubs.length === 0) {
-    addFinding('INFO', 'Subdomains', 'No subdomain found', `${commonSubs.length} subdomains tested`, '');
+    addFinding('INFO', 'Subdomains', 'No subdomain found', `${total} candidate(s) tested (${crtCount} from crt.sh, ${commonSubs.length} common prefixes)`, '');
     return;
   }
 
@@ -2375,8 +2597,11 @@ async function scanSubdomains(baseUrl, spinner) {
       addFinding('MOYENNE', 'Subdomains', `Sensitive subdomain accessible: ${subdomain}`, `${protocol}://${subdomain} responds (status ${status})${server ? `\nServer: ${server}` : ''}\nIP: ${ips.join(', ')}`, `Verify that ${subdomain} requires authentication.`);
     }
 
-    // Subdomain without HTTPS
-    if (!httpsRes && httpRes) {
+    // Subdomain without HTTPS - skip subdomains named after non-HTTP protocols
+    // (ftp.example.com, smtp.example.com, etc.) where HTTP isn't the primary
+    // service. They may respond on 80 by accident but flagging them is noise.
+    const nonHttpProtocolNames = ['ftp', 'sftp', 'smtp', 'imap', 'pop', 'mail', 'mx', 'ssh', 'vpn', 'sip', 'irc', 'ldap', 'ntp', 'dns'];
+    if (!httpsRes && httpRes && !nonHttpProtocolNames.includes(subName)) {
       addFinding('MOYENNE', 'Subdomains', `${subdomain} accessible only via HTTP`, `No HTTPS on ${subdomain}`, `Enable HTTPS on ${subdomain}`);
     }
   }
@@ -2501,9 +2726,145 @@ async function auditDns(baseUrl, spinner) {
       }
     } catch {}
   }
+
+  // ── DNSSEC (presence of DS records on the parent zone) ──
+  spinner.text = 'Checking DNSSEC...';
+  try {
+    const resolveAny = promisify(dns.default.resolve);
+    // dns.resolve(domain, 'DS') is supported in Node 18+
+    const dsRecords = await resolveAny(baseDomain, 'DS').catch(() => null);
+    if (dsRecords && dsRecords.length > 0) {
+      addFinding('INFO', 'DNS / Email', 'DNSSEC active (DS records present)', `${dsRecords.length} DS record(s) on ${baseDomain}`, '');
+    } else {
+      addFinding('FAIBLE', 'DNS / Email', 'DNSSEC not configured',
+        `No DS records found for ${baseDomain}.\nDNSSEC prevents DNS spoofing and cache poisoning attacks.`,
+        'Enable DNSSEC at your registrar. Most registrars (Cloudflare, OVH, Gandi, Namecheap) support it in 1-click.');
+    }
+  } catch {}
+
+  // ── CAA records: limit which CAs can issue certs for the domain ──
+  spinner.text = 'Checking CAA records...';
+  try {
+    const resolveCaa = promisify(dns.default.resolveCaa || dns.default.resolve);
+    let caaRecords;
+    if (dns.default.resolveCaa) {
+      caaRecords = await dns.default.promises.resolveCaa(baseDomain).catch(() => null);
+    } else {
+      caaRecords = await new Promise((resolve) => {
+        dns.default.resolve(baseDomain, 'CAA', (err, records) => resolve(err ? null : records));
+      });
+    }
+    if (caaRecords && caaRecords.length > 0) {
+      addFinding('INFO', 'DNS / Email', `CAA records configured (${caaRecords.length})`,
+        `CAs allowed to issue: ${caaRecords.map(r => r.issue || r.issuewild || JSON.stringify(r)).join(', ')}`, '');
+    } else {
+      addFinding('FAIBLE', 'DNS / Email', 'No CAA records',
+        `Without CAA, any CA can issue a cert for ${baseDomain}.\nA compromised CA can issue rogue certs that browsers accept.`,
+        `Add a CAA record. Example for Let's Encrypt only:\n  ${baseDomain}. CAA 0 issue "letsencrypt.org"\n  ${baseDomain}. CAA 0 iodef "mailto:security@${baseDomain}"`);
+    }
+  } catch {}
+
+  // ── MTA-STS: enforces TLS for inbound mail ──
+  spinner.text = 'Checking MTA-STS...';
+  let mtaStsConfigured = false;
+  try {
+    const mtaStsTxt = await resolveTxt(`_mta-sts.${baseDomain}`).catch(() => null);
+    if (mtaStsTxt && mtaStsTxt.length > 0) {
+      mtaStsConfigured = true;
+      const policyRes = await safeFetch(`https://mta-sts.${baseDomain}/.well-known/mta-sts.txt`);
+      if (policyRes && policyRes.status === 200) {
+        addFinding('INFO', 'DNS / Email', 'MTA-STS configured',
+          `_mta-sts.${baseDomain} TXT exists and policy file is reachable`, '');
+      } else {
+        addFinding('FAIBLE', 'DNS / Email', 'MTA-STS DNS record without policy file',
+          `TXT exists but https://mta-sts.${baseDomain}/.well-known/mta-sts.txt is not reachable.`,
+          'Publish the policy file at the well-known path with mode: enforce.');
+      }
+    }
+  } catch {}
+  if (!mtaStsConfigured) {
+    addFinding('INFO', 'DNS / Email', 'MTA-STS not configured',
+      'MTA-STS forces TLS on inbound SMTP and prevents downgrade attacks. Optional but recommended for serious email.',
+      `Add a TXT record at _mta-sts.${baseDomain} (v=STSv1; id=...) and host the policy file at https://mta-sts.${baseDomain}/.well-known/mta-sts.txt`);
+  }
+
+  // ── TLS-RPT: receive failure reports for MTA-STS / DANE ──
+  spinner.text = 'Checking TLS-RPT...';
+  try {
+    const tlsRptTxt = await resolveTxt(`_smtp._tls.${baseDomain}`).catch(() => null);
+    if (tlsRptTxt && tlsRptTxt.length > 0) {
+      const txt = tlsRptTxt.flat().join('');
+      if (txt.includes('v=TLSRPTv1')) {
+        addFinding('INFO', 'DNS / Email', 'TLS-RPT configured', `${txt}`, '');
+      }
+    }
+  } catch {}
 }
 
 // ──────────── MODULE 13 : API Endpoint Testing ────────────
+
+// Parse an OpenAPI/Swagger spec (already fetched as `specBody`) and probe each
+// documented GET endpoint without auth. Reveals when the spec is not just
+// "leaked" but actually points to live unprotected endpoints.
+async function enumerateOpenApiEndpoints(specUrl, specBody, baseUrl, spinner) {
+  let spec;
+  try { spec = JSON.parse(specBody); } catch { return; }
+  if (!spec || typeof spec !== 'object' || !spec.paths) return;
+
+  // OpenAPI 3.x has servers[]; Swagger 2.x has host + basePath + schemes
+  let apiBase = '';
+  if (Array.isArray(spec.servers) && spec.servers[0]?.url) {
+    apiBase = spec.servers[0].url.replace(/\/+$/, '');
+    if (apiBase.startsWith('/')) apiBase = new URL(baseUrl).origin + apiBase;
+  } else if (spec.host) {
+    const scheme = (Array.isArray(spec.schemes) && spec.schemes[0]) || 'https';
+    apiBase = `${scheme}://${spec.host}${spec.basePath || ''}`.replace(/\/+$/, '');
+  } else {
+    apiBase = new URL(baseUrl).origin;
+  }
+
+  const docOrigin = new URL(specUrl).origin;
+  if (!apiBase.startsWith('http')) apiBase = docOrigin + apiBase;
+
+  const allPaths = Object.entries(spec.paths);
+  const targeted = allPaths.slice(0, 30); // safety cap on huge specs
+  let probed = 0;
+  let exposed = 0;
+
+  for (const [pathKey, methods] of targeted) {
+    if (typeof methods !== 'object' || methods === null) continue;
+    // Skip parameterized paths - we don't have valid ids to fill in
+    if (/\{[^}]+\}/.test(pathKey)) continue;
+
+    if (typeof methods.get !== 'object') continue;
+    probed++;
+    spinner.text = `OpenAPI probe [${probed}/${targeted.length}] GET ${pathKey}...`;
+
+    const fullUrl = apiBase + pathKey;
+    const res = await safeFetch(fullUrl);
+    if (!res || res.status !== 200) continue;
+
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('text/html')) continue; // SPA catch-all
+    let body = '';
+    try { body = await res.text(); } catch {}
+    if (!body || body.length < 10) continue;
+
+    const isSensitive = /admin|internal|debug|user|account|password|secret|token|config|me\b/i.test(pathKey);
+    const sev = isSensitive ? 'CRITIQUE' : 'MOYENNE';
+    addFinding(sev, 'API Audit',
+      `Documented endpoint accessible without auth: GET ${pathKey}`,
+      `URL: ${fullUrl}\nStatus: ${res.status}, content-type: ${ct}\nResponse: ${body.substring(0, 200)}\nFrom OpenAPI/Swagger spec at ${specUrl}`,
+      'Verify authentication is required on this endpoint. If it is intentionally public, document it as such and remove sensitive fields from the response.');
+    exposed++;
+  }
+
+  if (probed > 0) {
+    addFinding('INFO', 'API Audit',
+      `OpenAPI spec parsed: ${probed} GET endpoint(s) probed, ${exposed} accessible without auth`,
+      `Spec source: ${specUrl}\n${allPaths.length > targeted.length ? `(only first ${targeted.length} paths probed; spec has ${allPaths.length})` : ''}`, '');
+  }
+}
 
 async function auditApiEndpoints(baseUrl, jsContents, spinner) {
   // Extract API endpoints from JS
@@ -2546,6 +2907,11 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
     tested++;
     if (tested % 5 === 0) spinner.text = `API [${tested}/${apiEndpoints.size}] ${endpoint}...`;
 
+    // GraphQL-specific tests (introspection, depth limit, field suggestions)
+    if (/\/graphql\b/i.test(endpoint)) {
+      try { await testGraphQLEndpoint(endpoint, spinner); } catch {}
+    }
+
     // ── Test 1 : Access without auth ──
     const res = await safeFetch(endpoint);
     if (!res) continue;
@@ -2572,9 +2938,10 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
       }
     }
 
-    // Swagger / OpenAPI exposed
+    // Swagger / OpenAPI exposed - parse the spec and probe each documented endpoint
     if (/swagger|openapi|api-docs/i.test(endpoint) && status === 200) {
       addFinding('ELEVEE', 'API Audit', `API documentation exposed: ${endpoint}`, `Swagger/OpenAPI documentation is publicly accessible.\nAn attacker can see all endpoints, parameters, and data models.`, 'Protect API documentation with authentication or disable it in production');
+      try { await enumerateOpenApiEndpoints(endpoint, body, baseUrl, spinner); } catch {}
     }
 
     // Debug / health endpoints
@@ -2695,6 +3062,16 @@ async function auditStorage(jsContents, spinner) {
     }
   }
 
+  // Bucket names that are typically public by convention (avatars, public assets, etc.).
+  // Listing these is expected and should be reported at INFO, not MOYENNE.
+  const PUBLIC_BY_CONVENTION = new Set([
+    'avatars', 'public', 'public-images', 'public-uploads', 'public-files',
+    'thumbnails', 'profile-pictures', 'profiles', 'logos', 'covers', 'banners',
+    'assets',
+  ]);
+  // Track buckets explicitly marked public via the bucket API
+  const knownPublicBuckets = new Set();
+
   // Test Supabase buckets
   if (supabaseUrl && anonKey) {
     spinner.text = 'Enumerating Supabase Storage buckets...';
@@ -2709,9 +3086,11 @@ async function auditStorage(jsContents, spinner) {
         const buckets = await bucketsRes.json();
         if (Array.isArray(buckets) && buckets.length > 0) {
           for (const bucket of buckets) {
-            bucketNames.add(bucket.name || bucket.id);
+            const name = bucket.name || bucket.id;
+            bucketNames.add(name);
             if (bucket.public) {
-              addFinding('INFO', 'Storage', `Bucket Supabase public: ${bucket.name}`, `Bucket "${bucket.name}" is marked as public`, 'Verify that this bucket only contains files intended to be public');
+              knownPublicBuckets.add(name);
+              addFinding('INFO', 'Storage', `Bucket Supabase public: ${name}`, `Bucket "${name}" is marked as public`, 'Verify that this bucket only contains files intended to be public');
             }
           }
         }
@@ -2743,21 +3122,28 @@ async function auditStorage(jsContents, spinner) {
         if (Array.isArray(files) && files.length > 0) {
           const fileNames = files.map(f => f.name).filter(Boolean).slice(0, 10);
           const hasPrivateData = /invoice|facture|contrat|contract|passport|id_card|cv|resume|bank|payment|secret|private|backup|export|dump/i.test(fileNames.join(' '));
+          const isExpectedPublic = knownPublicBuckets.has(bucket) || PUBLIC_BY_CONVENTION.has(bucket.toLowerCase());
 
           if (hasPrivateData) {
+            // Sensitive content trumps "expected public" - report regardless
             addFinding('CRITIQUE', 'Storage', `Bucket "${bucket}" contains accessible sensitive files`, `Files: ${fileNames.join(', ')}\nThese files appear to contain private data and are accessible with the anon key.`, `Set bucket "${bucket}" to private and add RLS policies on storage.objects`);
+          } else if (isExpectedPublic) {
+            // Public bucket with non-sensitive content: this is the intended setup
+            addFinding('INFO', 'Storage', `Bucket "${bucket}" listable (public bucket, ${files.length} file(s))`, `Files: ${fileNames.join(', ')}\nBucket is marked public or named by a public-by-convention pattern.`, '');
           } else {
             addFinding('MOYENNE', 'Storage', `Bucket "${bucket}" listable with anon key (${files.length} file(s))`, `Files: ${fileNames.join(', ')}`, `Check if the content of bucket "${bucket}" should be public. If not, restrict access.`);
           }
 
-          // Test direct file access
-          for (const file of files.slice(0, 3)) {
-            if (!file.name) continue;
-            const fileUrl = `${supabaseUrl}/storage/v1/object/public/${bucket}/${file.name}`;
-            const fileRes = await safeFetch(fileUrl);
-            if (fileRes && fileRes.status === 200) {
-              const ct = fileRes.headers.get('content-type') || '';
-              addFinding('MOYENNE', 'Storage', `File publicly accessible: ${bucket}/${file.name}`, `URL: ${fileUrl}\nContent-Type: ${ct}`, '');
+          // Test direct file access (only flag if bucket is NOT expected public)
+          if (!isExpectedPublic) {
+            for (const file of files.slice(0, 3)) {
+              if (!file.name) continue;
+              const fileUrl = `${supabaseUrl}/storage/v1/object/public/${bucket}/${file.name}`;
+              const fileRes = await safeFetch(fileUrl);
+              if (fileRes && fileRes.status === 200) {
+                const ct = fileRes.headers.get('content-type') || '';
+                addFinding('MOYENNE', 'Storage', `File publicly accessible: ${bucket}/${file.name}`, `URL: ${fileUrl}\nContent-Type: ${ct}`, '');
+              }
             }
           }
         }
@@ -2939,10 +3325,23 @@ async function auditWebsockets(baseUrl, jsContents, spinner) {
 
       if (result.status === 'open' && result.messages && result.messages.length > 0) {
         const msgPreview = result.messages.slice(0, 3).join('\n');
-        const hasData = /email|user|password|token|message|content|data/i.test(msgPreview);
 
-        if (hasData) {
+        // Detect actual user data, not protocol-level words.
+        // Real leaks contain emails, JWTs, hashes, or quoted user-data fields.
+        const sensitiveDataPatterns = [
+          /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/,                  // email addresses
+          /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/,                       // JWT shape
+          /\$2[aby]?\$\d{2}\$[./A-Za-z0-9]{53}/,                             // bcrypt
+          /\$argon2[id]{1,2}\$[^"\s]+/,                                       // argon2
+          /"(?:email|password|password_hash|encrypted_password|phone|ssn|first_name|last_name|address|credit_card|card_number)"\s*:\s*"[^"]+"/i,
+        ];
+        const looksLikeProtocolHandshake = /"event"\s*:\s*"phx_(?:reply|join|close)"|"event"\s*:\s*"system"|"event"\s*:\s*"presence_/.test(msgPreview);
+        const hasSensitiveData = sensitiveDataPatterns.some(p => p.test(msgPreview));
+
+        if (hasSensitiveData) {
           addFinding('ELEVEE', 'WebSocket', `WebSocket exposes data without auth: ${wsUrl}`, `${result.messages.length} message(s) received without authentication:\n${msgPreview}`, 'Add authentication to the WebSocket connection. Check RLS policies on Supabase Realtime channels.');
+        } else if (looksLikeProtocolHandshake) {
+          addFinding('INFO', 'WebSocket', `WebSocket accepts anonymous connection: ${wsUrl}`, `${result.messages.length} protocol-level message(s) received (handshake/system messages, no actual user data).\nFirst messages:\n${msgPreview}`, 'Anonymous WebSocket connection is intentional for some realtime services (e.g., Supabase Realtime with RLS). Verify subscriptions are guarded by RLS policies.');
         } else {
           addFinding('MOYENNE', 'WebSocket', `WebSocket accessible without auth: ${wsUrl}`, `${result.messages.length} message(s) received:\n${msgPreview}`, 'Verify that this WebSocket does not transmit sensitive data without authentication.');
         }
@@ -2955,6 +3354,279 @@ async function auditWebsockets(baseUrl, jsContents, spinner) {
   }
 
   await browser.close();
+}
+
+// ──────────── MODULE 16 : TLS Deeper Analysis ────────────
+
+async function auditTls(baseUrl, spinner) {
+  const url = new URL(baseUrl);
+  if (url.protocol !== 'https:') {
+    addFinding('CRITIQUE', 'TLS', 'Site does not use HTTPS', `${baseUrl} uses plain HTTP`, 'Enable HTTPS with a valid TLS certificate (Let\'s Encrypt is free and automated)');
+    return;
+  }
+
+  const host = url.hostname;
+  const port = parseInt(url.port || '443');
+  const tls = await import('tls');
+
+  // Connect to gather certificate + negotiated protocol/cipher
+  spinner.text = `TLS: connecting to ${host}:${port}...`;
+  const certInfo = await new Promise((resolve) => {
+    let resolved = false;
+    const done = (val) => { if (!resolved) { resolved = true; resolve(val); } };
+    try {
+      const socket = tls.default.connect({
+        host, port, servername: host, timeout: 6000,
+        rejectUnauthorized: false,
+      }, () => {
+        const cert = socket.getPeerCertificate(true);
+        const protocol = socket.getProtocol();
+        const cipher = socket.getCipher();
+        socket.end();
+        done({ cert, protocol, cipher });
+      });
+      socket.on('error', () => done(null));
+      socket.on('timeout', () => { socket.destroy(); done(null); });
+    } catch {
+      done(null);
+    }
+  });
+
+  if (!certInfo || !certInfo.cert || !certInfo.cert.valid_to) {
+    addFinding('INFO', 'TLS', 'TLS handshake failed', `Could not complete TLS handshake with ${host}:${port}`, 'Verify the host accepts TLS connections on port 443');
+    return;
+  }
+
+  const cert = certInfo.cert;
+
+  // Issuer / self-signed (computed before expiration check so we can adjust
+  // severity based on the CA - Let's Encrypt certs are 90 days with standard
+  // auto-renew at ~30 days remaining, so "25 days left" is normal there).
+  const issuerCN = (cert.issuer && (cert.issuer.O || cert.issuer.CN)) || 'unknown';
+  const isShortLivedCA = /let'?s encrypt|zerossl|google trust services|buypass go ssl/i.test(issuerCN);
+
+  // Certificate expiration
+  const validTo = new Date(cert.valid_to);
+  const daysLeft = Math.floor((validTo.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  if (daysLeft < 0) {
+    addFinding('CRITIQUE', 'TLS', `Certificate EXPIRED ${Math.abs(daysLeft)} day(s) ago`, `Expired on ${cert.valid_to}\nBrowsers will refuse to connect.`, 'Renew the certificate immediately');
+  } else if (daysLeft < 7) {
+    addFinding('ELEVEE', 'TLS', `Certificate expires in ${daysLeft} day(s)`, `Expires on ${cert.valid_to}\nIssuer: ${issuerCN}`, 'Renew immediately. Verify auto-renewal is configured (certbot --renew, caddy auto-renew, etc.)');
+  } else if (daysLeft < 14) {
+    addFinding('MOYENNE', 'TLS', `Certificate expires in ${daysLeft} day(s)`, `Expires on ${cert.valid_to}\nIssuer: ${issuerCN}`, 'Renew now or verify auto-renewal is configured.');
+  } else if (daysLeft < 30) {
+    // Short-lived CAs (Let's Encrypt 90-day certs) typically auto-renew at ~30
+    // days remaining, so this window is normal for correctly-configured sites.
+    if (isShortLivedCA) {
+      addFinding('INFO', 'TLS', `Certificate expires in ${daysLeft} day(s) (auto-renew window)`, `Expires on ${cert.valid_to}\nIssuer: ${issuerCN} - typically auto-renewed at ~30 days remaining.`, '');
+    } else {
+      addFinding('MOYENNE', 'TLS', `Certificate expires in ${daysLeft} day(s)`, `Expires on ${cert.valid_to}\nIssuer: ${issuerCN}`, 'Plan renewal soon. Configure auto-renewal if not already.');
+    }
+  } else {
+    addFinding('INFO', 'TLS', `Certificate valid until ${cert.valid_to}`, `${daysLeft} days remaining`, '');
+  }
+  const subjectCN = (cert.subject && cert.subject.CN) || 'unknown';
+  addFinding('INFO', 'TLS', `Certificate issued by ${issuerCN}`, `Subject: ${subjectCN}\nSerial: ${cert.serialNumber || 'unknown'}`, '');
+  if (cert.issuer && cert.subject && cert.issuer.CN === cert.subject.CN && cert.issuer.O === cert.subject.O) {
+    addFinding('ELEVEE', 'TLS', 'Self-signed certificate', `Issuer and subject match (${cert.issuer.CN}). Browsers will warn users.`, 'Switch to a CA-signed cert (Let\'s Encrypt is free)');
+  }
+
+  // Wildcard certs
+  if (subjectCN.startsWith('*.')) {
+    addFinding('INFO', 'TLS', `Wildcard certificate (${subjectCN})`, 'Wildcard certs cover all subdomains. If the private key leaks, every subdomain is impacted.', 'For sensitive services, consider per-host certs.');
+  }
+
+  // Negotiated protocol
+  const protocol = certInfo.protocol || 'unknown';
+  addFinding('INFO', 'TLS', `Negotiated protocol: ${protocol}`, certInfo.cipher ? `Cipher: ${certInfo.cipher.name} (${certInfo.cipher.version})` : '', '');
+
+  // Weak cipher
+  if (certInfo.cipher && /\b(?:RC4|DES|3DES|MD5|EXPORT|NULL|anon)\b/i.test(certInfo.cipher.name)) {
+    addFinding('CRITIQUE', 'TLS', `Weak cipher suite: ${certInfo.cipher.name}`, '', 'Disable weak ciphers in your TLS config. Recommended: TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, ECDHE-RSA-AES256-GCM-SHA384.');
+  }
+
+  // Test deprecated TLS versions
+  spinner.text = 'TLS: probing legacy protocol versions...';
+  for (const oldVer of ['TLSv1', 'TLSv1.1']) {
+    const supported = await new Promise((resolve) => {
+      let resolved = false;
+      const done = (v) => { if (!resolved) { resolved = true; resolve(v); } };
+      try {
+        const socket = tls.default.connect({
+          host, port, servername: host, timeout: 4000,
+          minVersion: oldVer, maxVersion: oldVer,
+          rejectUnauthorized: false,
+        }, () => { socket.end(); done(true); });
+        socket.on('error', () => done(false));
+        socket.on('timeout', () => { socket.destroy(); done(false); });
+      } catch {
+        done(false);
+      }
+    });
+    if (supported) {
+      addFinding('ELEVEE', 'TLS', `${oldVer} accepted (deprecated)`, `${oldVer} has known vulnerabilities (BEAST, POODLE, etc.) and is removed from modern browsers.`, `Disable ${oldVer} in nginx: ssl_protocols TLSv1.2 TLSv1.3;\nIn Apache: SSLProtocol -all +TLSv1.2 +TLSv1.3`);
+    }
+  }
+}
+
+// ──────────── MODULE 17 : GraphQL Endpoint Tests ────────────
+
+async function testGraphQLEndpoint(endpoint, spinner) {
+  // 1. Introspection query - also doubles as the "is this really GraphQL" probe.
+  // Many SPAs return 200 HTML for /graphql due to catch-all routing; we must NOT
+  // run the depth-limit and field-suggestions tests on those (false positives).
+  spinner.text = `GraphQL: testing introspection on ${endpoint}...`;
+  const introspectionQuery = '{ __schema { queryType { name } mutationType { name } types { name } } }';
+  const introRes = await safeFetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: introspectionQuery }),
+  });
+
+  if (!introRes) return;
+  let body;
+  try { body = await introRes.text(); } catch { return; }
+
+  // Identify whether this is actually a GraphQL endpoint.
+  // A real GraphQL response is JSON with `data` and/or `errors` fields.
+  // HTML, plain text, redirects, 404s all mean: not GraphQL, skip everything.
+  let parsedIntro;
+  try { parsedIntro = JSON.parse(body); } catch {}
+  const isGraphQL = parsedIntro && (parsedIntro.data !== undefined || Array.isArray(parsedIntro.errors));
+  if (!isGraphQL) return;
+
+  if (introRes.status === 200 && parsedIntro.data && parsedIntro.data.__schema) {
+    const typeCount = parsedIntro.data.__schema.types?.length || '?';
+    const hasMutation = !!parsedIntro.data.__schema.mutationType?.name;
+    addFinding('ELEVEE', 'GraphQL', `Introspection enabled on ${endpoint}`,
+      `Schema introspection returned ${typeCount} type(s)${hasMutation ? ' (mutations exposed)' : ''}.\nAttacker can map every query, mutation, type, and field.`,
+      'Disable introspection in production. Apollo: introspection: false. Yoga: graphqlEndpoint with disabled introspection. Spring: spring.graphql.schema.introspection.enabled=false.');
+  }
+
+  // 2. Query depth limit - send a deeply nested query
+  spinner.text = `GraphQL: testing query depth on ${endpoint}...`;
+  const deepQuery = '{ a:__typename b:__typename c { ' + 'x { '.repeat(15) + '__typename' + ' }'.repeat(15) + ' } }';
+  const deepRes = await safeFetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: deepQuery }),
+  });
+  if (deepRes) {
+    let depthBody = '';
+    try { depthBody = await deepRes.text(); } catch {}
+    let parsedDepth;
+    try { parsedDepth = JSON.parse(depthBody); } catch {}
+    // Only flag if the response is still valid GraphQL (otherwise something
+    // changed mid-scan or the server rejected the request shape, both fine).
+    const stillGraphQL = parsedDepth && (parsedDepth.data !== undefined || Array.isArray(parsedDepth.errors));
+    if (stillGraphQL && deepRes.status < 400 && !/depth|complexity|maximum|too\s+deep/i.test(depthBody)) {
+      addFinding('MOYENNE', 'GraphQL', `No query depth limit on ${endpoint}`,
+        'Server accepted a 15-level nested query without complaint. Vulnerable to DoS via deeply nested queries.',
+        'Add graphql-depth-limit (Node) or equivalent middleware. Recommended max depth: 5-7.');
+    }
+  }
+
+  // 3. Field suggestions - intentional typo, look for "Did you mean..."
+  spinner.text = `GraphQL: testing field suggestions on ${endpoint}...`;
+  const typoRes = await safeFetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: '{ querType { name } }' }),
+  });
+  if (typoRes) {
+    let typoBody = '';
+    try { typoBody = await typoRes.text(); } catch {}
+    if (/did you mean/i.test(typoBody)) {
+      addFinding('FAIBLE', 'GraphQL', `Field suggestions enabled on ${endpoint}`,
+        'Server returns "Did you mean ..." messages on typos. Attackers use this to enumerate the schema even with introspection disabled.',
+        'Disable field suggestions. Apollo: validationRules including NoFieldSuggestionsRule. graphql-js: --no-suggestions or custom validation.');
+    }
+  }
+}
+
+// ──────────── MODULE 18 : WordPress Specifics ────────────
+
+async function auditWordPress(baseUrl, jsContents, spinner) {
+  // Detect WordPress via markers in HTML/JS - skip silently if not WP
+  const allContent = jsContents.join('\n');
+  const wpDetected = /wp-content\/|wp-includes\/|wp-json|wordpress/i.test(allContent);
+  if (!wpDetected) {
+    addFinding('INFO', 'WordPress', 'WordPress not detected on target', '', '');
+    return;
+  }
+
+  addFinding('INFO', 'WordPress', 'WordPress detected - running WP-specific checks', '', '');
+  const origin = new URL(baseUrl).origin;
+
+  // 1. User enumeration via ?author=N (redirects to /author/{username}/)
+  spinner.text = 'WordPress: enumerating users via ?author=N...';
+  const usernames = new Set();
+  for (let i = 1; i <= 10; i++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${origin}/?author=${i}`, { signal: controller.signal, redirect: 'manual' });
+      clearTimeout(timeout);
+      const location = res.headers.get('location') || '';
+      const m = location.match(/\/author\/([^\/?#]+)/i);
+      if (m) usernames.add(m[1]);
+    } catch {}
+  }
+  if (usernames.size > 0) {
+    addFinding('ELEVEE', 'WordPress',
+      `User enumeration via ?author=N - ${usernames.size} username(s) leaked`,
+      `Usernames: ${[...usernames].join(', ')}\nWordPress redirects /?author=N to /author/{username}/, leaking the login slug. Combined with the wp-login.php endpoint, this lets attackers brute-force exact accounts.`,
+      'Block /?author= queries: in .htaccess add "RewriteCond %{QUERY_STRING} author=" + "RewriteRule .* - [F]". Or use a security plugin (Wordfence, iThemes Security).');
+  }
+
+  // 2. /wp-json/wp/v2/users exposes user list
+  spinner.text = 'WordPress: testing /wp-json/wp/v2/users...';
+  const usersRes = await safeFetch(`${origin}/wp-json/wp/v2/users`);
+  if (usersRes && usersRes.status === 200) {
+    let users;
+    try { users = await usersRes.json(); } catch {}
+    if (Array.isArray(users) && users.length > 0) {
+      const slugs = users.slice(0, 10).map(u => u.slug || u.name).filter(Boolean).join(', ');
+      addFinding('ELEVEE', 'WordPress',
+        `/wp-json/wp/v2/users exposes ${users.length} user(s)`,
+        `Slugs: ${slugs}\nThe REST API exposes the list of registered users including their login slugs.`,
+        `Restrict the endpoint via functions.php:\n  add_filter('rest_endpoints', function(\$ep) { unset(\$ep['/wp/v2/users']); unset(\$ep['/wp/v2/users/(?P<id>[\\\\d]+)']); return \$ep; });`);
+    }
+  }
+
+  // 3. xmlrpc.php (often exposed, used for brute-force amplification)
+  spinner.text = 'WordPress: testing xmlrpc.php...';
+  const xmlrpcRes = await safeFetch(`${origin}/xmlrpc.php`);
+  if (xmlrpcRes && (xmlrpcRes.status === 200 || xmlrpcRes.status === 405)) {
+    let body = '';
+    try { body = await xmlrpcRes.text(); } catch {}
+    const isActive = /XML-RPC server accepts POST requests only|methodCall/i.test(body) || xmlrpcRes.status === 405;
+    if (isActive) {
+      addFinding('MOYENNE', 'WordPress',
+        'xmlrpc.php exposed',
+        `XML-RPC API is reachable. system.multicall lets attackers test thousands of password attempts in a single request, bypassing typical rate limiting.`,
+        `Disable xmlrpc.php in Apache (.htaccess):\n  <Files xmlrpc.php>\n    Require all denied\n  </Files>\nNginx: location ~* /xmlrpc\\.php { deny all; }`);
+    }
+  }
+
+  // 4. wp-login.php at the default path
+  spinner.text = 'WordPress: testing wp-login.php...';
+  const loginRes = await safeFetch(`${origin}/wp-login.php`);
+  if (loginRes && loginRes.status === 200) {
+    addFinding('FAIBLE', 'WordPress',
+      'wp-login.php at default path',
+      'Login page is accessible at the standard URL, making automated brute-force easier.',
+      'Hide the login URL with a plugin like WPS Hide Login. Adds friction against bots scanning for /wp-login.php.');
+  }
+
+  // 5. wp-cron.php (DoS amplifier on shared hosting)
+  const cronRes = await safeFetch(`${origin}/wp-cron.php`);
+  if (cronRes && cronRes.status === 200) {
+    addFinding('FAIBLE', 'WordPress',
+      'wp-cron.php publicly accessible',
+      'Anyone can trigger wp-cron.php. On shared hosting this can be used for resource exhaustion.',
+      'Disable HTTP-triggered cron in wp-config.php: define("DISABLE_WP_CRON", true);\nThen run cron via system cron: */15 * * * * php /path/wp-cron.php');
+  }
 }
 
 // ──────────── SCORE DE SECURITE ────────────
@@ -3220,22 +3892,31 @@ async function viewHistory() {
 
 // ──────────── MAIN ────────────
 
-async function main() {
-  const { url } = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'url',
-      message: chalk.bold('Target URL to scan:'),
-      validate: (input) => {
-        try {
-          new URL(input);
-          return true;
-        } catch {
-          return 'Enter a valid URL (e.g. https://example.com)';
-        }
+async function main(options = {}) {
+  // Configure authenticated crawl from caller-supplied options (CLI flags)
+  if (options.authCookie || options.authHeader) {
+    AUTH_CONTEXT = parseAuthString(options.authCookie, options.authHeader);
+    if (AUTH_CONTEXT) {
+      const cookieCount = AUTH_CONTEXT.cookies.length;
+      const headerCount = Object.keys(AUTH_CONTEXT.headers).length;
+      console.log(chalk.gray(`  Auth context loaded: ${cookieCount} cookie(s), ${headerCount} header(s) - applied to crawl pages.\n`));
+    }
+  }
+
+  let url = options.url;
+  if (!url) {
+    const answer = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'url',
+        message: chalk.bold('Target URL to scan:'),
+        validate: (input) => {
+          try { new URL(input); return true; } catch { return 'Enter a valid URL (e.g. https://example.com)'; }
+        },
       },
-    },
-  ]);
+    ]);
+    url = answer.url;
+  }
 
   const { modules } = await inquirer.prompt([
     {
@@ -3257,6 +3938,8 @@ async function main() {
         { name: 'API endpoint audit', value: 'api', checked: true },
         { name: 'Storage / Buckets (Supabase Storage, S3, GCS)', value: 'storage', checked: true },
         { name: 'WebSocket / Realtime (eavesdropping without auth)', value: 'websocket', checked: true },
+        { name: 'TLS deeper analysis (cert, version, ciphers)', value: 'tls', checked: true },
+        { name: 'WordPress specifics (user enum, xmlrpc, REST users)', value: 'wordpress', checked: true },
       ],
     },
   ]);
@@ -3418,6 +4101,28 @@ async function main() {
       spinner.succeed(chalk.green('WebSocket audit complete'));
     } catch (err) {
       spinner.fail(chalk.red(`WebSocket audit failed: ${err.message}`));
+    }
+  }
+
+  // STEP 15b: WordPress specifics
+  if (modules.includes('wordpress')) {
+    const spinner = ora({ text: 'WordPress audit...', color: 'magenta' }).start();
+    try {
+      await auditWordPress(baseUrl, jsContents, spinner);
+      spinner.succeed(chalk.green('WordPress audit complete'));
+    } catch (err) {
+      spinner.fail(chalk.red(`WordPress audit failed: ${err.message}`));
+    }
+  }
+
+  // STEP 15a: TLS deeper analysis
+  if (modules.includes('tls')) {
+    const spinner = ora({ text: 'TLS analysis...', color: 'magenta' }).start();
+    try {
+      await auditTls(baseUrl, spinner);
+      spinner.succeed(chalk.green('TLS analysis complete'));
+    } catch (err) {
+      spinner.fail(chalk.red(`TLS analysis failed: ${err.message}`));
     }
   }
 
