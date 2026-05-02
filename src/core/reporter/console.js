@@ -7,9 +7,14 @@ import chalk from 'chalk';
 import { getFindings } from '../findings.js';
 import { calculateScore, severityColor } from '../score.js';
 
-export function printReport(title = 'Security Audit Report') {
-  const { score, grade, color } = calculateScore();
-  const findings = getFindings();
+export function printReport(title = 'Security Audit Report', options = {}) {
+  const allFindings = getFindings();
+  const { score, grade, color } = calculateScore(undefined, options);
+
+  // Findings suppressed by baseline are kept in the array but not displayed
+  // by default, to keep the report focused on what actually needs action.
+  const baselinedCount = allFindings.filter(f => f.baselined).length;
+  const findings = options.showBaselined ? allFindings : allFindings.filter(f => !f.baselined);
 
   console.log('\n');
   console.log(chalk.bold('━'.repeat(60)));
@@ -18,9 +23,16 @@ export function printReport(title = 'Security Audit Report') {
   console.log(chalk.bold('━'.repeat(60)));
   console.log('');
   console.log(`  Security Score: ${color(` ${grade} `)} ${chalk.gray(`(${score}/100)`)}`);
+  if (baselinedCount > 0) {
+    console.log(chalk.gray(`  ${baselinedCount} finding(s) suppressed by baseline`));
+  }
 
   if (findings.length === 0) {
-    console.log(chalk.green('\n  No vulnerabilities detected. Good job!\n'));
+    if (allFindings.length === 0) {
+      console.log(chalk.green('\n  No vulnerabilities detected. Good job!\n'));
+    } else {
+      console.log(chalk.green('\n  No new findings beyond the baseline.\n'));
+    }
     return;
   }
 
@@ -46,7 +58,8 @@ export function printReport(title = 'Security Audit Report') {
       currentModule = f.module;
       console.log(chalk.bold.underline(`\n  ${currentModule}`));
     }
-    console.log(`\n  ${severityColor(f.severity)} ${chalk.bold(f.title)}`);
+    const confTag = f.confidence && f.confidence !== 'medium' ? chalk.gray(` [${f.confidence}]`) : '';
+    console.log(`\n  ${severityColor(f.severity)}${confTag} ${chalk.bold(f.title)}`);
     console.log(chalk.gray(`    ${f.detail}`));
     if (f.recommendation) console.log(chalk.green(`    → ${f.recommendation}`));
   }

@@ -116,6 +116,40 @@ export function findingToRuleId(finding) {
     return 'vice/headers/generic';
   }
 
+  // Git History
+  if (module === 'Git History') return 'vice/git-history/leaked-secret';
+
+  // Container
+  if (module === 'Container') return 'vice/container/misconfig';
+
+  // CI/CD Security
+  if (module === 'CI/CD Security') {
+    if (/Unpinned action/i.test(title)) return 'vice/ci/unpinned-action';
+    if (/Secret echoed|Hardcoded secret/i.test(title)) return 'vice/ci/secret-leak';
+    if (/pull_request_target/i.test(title)) return 'vice/ci/pr-target';
+    if (/write-all/i.test(title)) return 'vice/ci/write-all';
+    if (/comment body/i.test(title)) return 'vice/ci/script-injection';
+    return 'vice/ci/generic';
+  }
+
+  // Storage Security (localStorage / sessionStorage tokens)
+  if (module === 'Storage Security') return 'vice/storage/token-in-storage';
+
+  // SRI
+  if (module === 'SRI') return 'vice/sri/missing-integrity';
+
+  // Mixed Content
+  if (module === 'Mixed Content') return 'vice/mixed-content/http-on-https';
+
+  // TLS
+  if (module === 'TLS') return 'vice/tls/issue';
+
+  // GraphQL
+  if (module === 'GraphQL') return 'vice/graphql/issue';
+
+  // WordPress
+  if (module === 'WordPress') return 'vice/wordpress/issue';
+
   // Fallback
   const moduleSlug = slugify(module);
   return `vice/${moduleSlug}/generic`;
@@ -312,6 +346,78 @@ const RULE_METADATA = {
   },
 };
 
+// ── Rule taxonomy (CWE + OWASP Top 10 2021) ───────────────────
+// Mapping every concrete rule to a CWE id and an OWASP category.
+// Used to enrich SARIF properties.tags and the JSON report with
+// references that GitHub Code Scanning and human reviewers expect.
+export const RULE_TAXONOMY = {
+  'vice/code/sqli-template':       { cwe: 89,  owasp: 'A03:2021' },
+  'vice/code/sqli-concat':         { cwe: 89,  owasp: 'A03:2021' },
+  'vice/code/sqli-where':          { cwe: 89,  owasp: 'A03:2021' },
+  'vice/code/xss-react':           { cwe: 79,  owasp: 'A03:2021' },
+  'vice/code/xss-vue':             { cwe: 79,  owasp: 'A03:2021' },
+  'vice/code/xss-dom':             { cwe: 79,  owasp: 'A03:2021' },
+  'vice/code/eval':                { cwe: 95,  owasp: 'A03:2021' },
+  'vice/code/cmd-injection':       { cwe: 78,  owasp: 'A03:2021' },
+  'vice/code/open-redirect':       { cwe: 601, owasp: 'A01:2021' },
+  'vice/code/weak-crypto':         { cwe: 327, owasp: 'A02:2021' },
+  'vice/code/redos':               { cwe: 1333, owasp: 'A05:2021' },
+  'vice/auth/cors-wildcard':       { cwe: 942, owasp: 'A01:2021' },
+  'vice/auth/hardcoded-password':  { cwe: 798, owasp: 'A07:2021' },
+  'vice/auth/insecure-session':    { cwe: 614, owasp: 'A05:2021' },
+  'vice/auth/session-no-httponly': { cwe: 1004, owasp: 'A05:2021' },
+  'vice/auth/jwt-no-expiration':   { cwe: 613, owasp: 'A07:2021' },
+  'vice/auth/no-rate-limiting':    { cwe: 307, owasp: 'A04:2021' },
+  'vice/auth/no-csrf':             { cwe: 352, owasp: 'A01:2021' },
+  'vice/auth/no-helmet':           { cwe: 693, owasp: 'A05:2021' },
+  'vice/secrets/hardcoded-secret': { cwe: 798, owasp: 'A07:2021' },
+  'vice/env/exposed-env':          { cwe: 200, owasp: 'A05:2021' },
+  'vice/deps/vulnerable-dep':      { cwe: 1104, owasp: 'A06:2021' },
+  'vice/rls/missing-rls':          { cwe: 862, owasp: 'A01:2021' },
+  'vice/headers/no-csp':           { cwe: 693, owasp: 'A05:2021' },
+  'vice/headers/no-hsts':          { cwe: 319, owasp: 'A02:2021' },
+  'vice/headers/x-powered-by':     { cwe: 200, owasp: 'A05:2021' },
+
+  // Phase 3+ modules
+  'vice/git-history/leaked-secret':    { cwe: 798,  owasp: 'A07:2021' },
+  'vice/container/misconfig':          { cwe: 668,  owasp: 'A05:2021' },
+  'vice/ci/unpinned-action':           { cwe: 1357, owasp: 'A08:2021' },
+  'vice/ci/secret-leak':               { cwe: 532,  owasp: 'A09:2021' },
+  'vice/ci/pr-target':                 { cwe: 829,  owasp: 'A08:2021' },
+  'vice/ci/write-all':                 { cwe: 250,  owasp: 'A04:2021' },
+  'vice/ci/script-injection':          { cwe: 78,   owasp: 'A03:2021' },
+  'vice/storage/token-in-storage':     { cwe: 922,  owasp: 'A02:2021' },
+  'vice/sri/missing-integrity':        { cwe: 829,  owasp: 'A08:2021' },
+  'vice/mixed-content/http-on-https':  { cwe: 311,  owasp: 'A02:2021' },
+  'vice/tls/issue':                    { cwe: 326,  owasp: 'A02:2021' },
+  'vice/graphql/issue':                { cwe: 200,  owasp: 'A05:2021' },
+  'vice/wordpress/issue':              { cwe: 200,  owasp: 'A05:2021' },
+};
+
+// Map rule level (or finding severity) to a CVSS-style numeric string,
+// the format GitHub Code Scanning expects for properties["security-severity"].
+const LEVEL_TO_SECURITY_SEVERITY = {
+  error: '7.0',
+  warning: '5.0',
+  note: '3.0',
+};
+
+// Enrich a findings array with `ruleId`, `cwe`, and `owasp` fields.
+// Returns a new array, does not mutate the input.
+export function enrichWithTaxonomy(findings) {
+  if (!Array.isArray(findings)) return findings;
+  return findings.map(f => {
+    const ruleId = findingToRuleId(f);
+    const tax = RULE_TAXONOMY[ruleId];
+    const enriched = { ...f, ruleId };
+    if (tax) {
+      enriched.cwe = `CWE-${tax.cwe}`;
+      enriched.owasp = tax.owasp;
+    }
+    return enriched;
+  });
+}
+
 function getRuleMetadata(ruleId, finding) {
   if (RULE_METADATA[ruleId]) return RULE_METADATA[ruleId];
 
@@ -374,7 +480,7 @@ function buildLocation(finding) {
 
 export function buildSarif(findings, version) {
   const safeFindings = Array.isArray(findings) ? findings : [];
-  const filtered = safeFindings.filter(f => f && !isInfoSeverity(f.severity));
+  const filtered = safeFindings.filter(f => f && !isInfoSeverity(f.severity) && !f.baselined);
 
   const ruleMap = new Map();
   const results = [];
@@ -383,6 +489,12 @@ export function buildSarif(findings, version) {
     const ruleId = findingToRuleId(finding);
     if (!ruleMap.has(ruleId)) {
       const meta = getRuleMetadata(ruleId, finding);
+      const taxonomy = RULE_TAXONOMY[ruleId];
+      const tags = ['security'];
+      if (taxonomy) {
+        tags.push(`external/cwe/cwe-${taxonomy.cwe}`);
+        tags.push(`owasp/${taxonomy.owasp.toLowerCase().replace(':', '-')}`);
+      }
       ruleMap.set(ruleId, {
         id: ruleId,
         name: meta.name,
@@ -390,6 +502,11 @@ export function buildSarif(findings, version) {
         fullDescription: { text: meta.full },
         helpUri: HELP_URI,
         defaultConfiguration: { level: meta.level },
+        properties: {
+          tags,
+          'security-severity': LEVEL_TO_SECURITY_SEVERITY[meta.level] || '5.0',
+          ...(taxonomy ? { cwe: `CWE-${taxonomy.cwe}`, owasp: taxonomy.owasp } : {}),
+        },
       });
     }
 

@@ -6,8 +6,16 @@
 const findings = [];
 const discoveredIps = new Set();
 
-export function addFinding(severity, module, title, detail, recommendation, location) {
-  findings.push({ severity, module, title, detail, recommendation, location });
+export function addFinding(severity, module, title, detail, recommendation, location, confidence) {
+  findings.push({
+    severity,
+    module,
+    title,
+    detail,
+    recommendation,
+    location,
+    confidence: confidence || 'medium',
+  });
 }
 
 export function getFindings() {
@@ -19,6 +27,11 @@ export function clearFindings() {
 }
 
 export function loadFindings(data) {
+  findings.length = 0;
+  findings.push(...data);
+}
+
+export function setFindings(data) {
   findings.length = 0;
   findings.push(...data);
 }

@@ -5,6 +5,7 @@
 
 import chalk from 'chalk';
 import { getFindings } from './findings.js';
+import { groupKey } from './fingerprint.js';
 
 // Supports both French (legacy scan.js) and English severity levels
 const WEIGHT_MAP = {
@@ -15,12 +16,40 @@ const WEIGHT_MAP = {
   INFO: 0,
 };
 
-export function calculateScore(findingsData) {
+// Cap how many times the same rule can hit the score (prevents one noisy
+// rule on many files from tanking the grade beyond reason).
+const MAX_PENALTIES_PER_RULE = 3;
+
+const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
+export const SEVERITY_RANK = {
+  CRITICAL: 5, CRITIQUE: 5,
+  HIGH: 4, ELEVEE: 4,
+  MEDIUM: 3, MOYENNE: 3,
+  LOW: 2, FAIBLE: 2,
+  INFO: 1,
+};
+
+export function calculateScore(findingsData, options = {}) {
   const data = findingsData || getFindings();
+  const minConfidence = options.minConfidence || 'low';
+  const minRank = CONFIDENCE_RANK[minConfidence] || 1;
+  const minSevRank = options.minSeverity ? (SEVERITY_RANK[options.minSeverity.toUpperCase()] || 1) : 1;
+
   let penalty = 0;
+  const counts = new Map();
+
   for (const f of data) {
+    if (f.baselined) continue;
+    const rank = CONFIDENCE_RANK[f.confidence || 'medium'] || 2;
+    if (rank < minRank) continue;
+    if ((SEVERITY_RANK[f.severity] || 0) < minSevRank) continue;
+    const key = groupKey(f);
+    const count = counts.get(key) || 0;
+    if (count >= MAX_PENALTIES_PER_RULE) continue;
+    counts.set(key, count + 1);
     penalty += WEIGHT_MAP[f.severity] || 0;
   }
+
   const rawScore = Math.max(0, 100 - penalty);
   let grade, color;
   if (rawScore >= 90) { grade = 'A'; color = chalk.green.bold; }
