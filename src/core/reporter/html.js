@@ -8,10 +8,11 @@ import path from 'path';
 import chalk from 'chalk';
 import { getFindings } from '../findings.js';
 import { calculateScore } from '../score.js';
+import { enrichWithTaxonomy } from './sarif.js';
 
 export async function exportHtml(url, baseDir) {
   const { score, grade } = calculateScore();
-  const findings = getFindings();
+  const findings = enrichWithTaxonomy(getFindings());
   const hostname = url.startsWith('http') ? new URL(url).hostname : path.basename(url);
   const dir = path.join(baseDir, 'scans');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -49,11 +50,14 @@ export async function exportHtml(url, baseDir) {
     }
     const detail = (f.detail || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const reco = (f.recommendation || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const cweTag = f.cwe ? `<span class="taxo-tag taxo-cwe">${f.cwe}</span>` : '';
+    const owaspTag = f.owasp ? `<span class="taxo-tag taxo-owasp">${f.owasp}</span>` : '';
     findingsHtml += `
       <div class="finding">
         <div class="finding-header">
           <span class="badge" style="background:${sevColors[f.severity] || '#888'}">${sevLabels[f.severity] || f.severity}</span>
           <span class="finding-title">${f.title}</span>
+          ${cweTag}${owaspTag}
         </div>
         ${detail ? `<pre class="finding-detail">${detail}</pre>` : ''}
         ${reco ? `<div class="finding-reco">${reco}</div>` : ''}
@@ -305,6 +309,18 @@ export async function exportHtml(url, baseDir) {
       .score-section { flex-direction: column; text-align: center; padding: 24px; }
       .finding-header { flex-direction: column; gap: 6px; }
     }
+    .taxo-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+    .taxo-cwe { background: #2c3e50; color: #fff; }
+    .taxo-owasp { background: #c0392b; color: #fff; }
   </style>
 </head>
 <body>
