@@ -5,8 +5,11 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { addFinding } from '../core/findings.js';
+
+const execAsync = promisify(exec);
 
 export async function auditDependencies(projectPath, spinner) {
   spinner.text = 'Auditing npm dependencies...';
@@ -19,8 +22,9 @@ export async function auditDependencies(projectPath, spinner) {
 
   spinner.text = 'Running npm audit...';
   try {
-    const output = execSync('npm audit --json 2>/dev/null', { cwd: projectPath, timeout: 30000 }).toString();
-    const audit = JSON.parse(output);
+    // Async exec lets other modules run in parallel while npm audit is busy
+    const { stdout } = await execAsync('npm audit --json', { cwd: projectPath, timeout: 30000, maxBuffer: 50 * 1024 * 1024 });
+    const audit = JSON.parse(stdout);
 
     if (audit.metadata) {
       const { vulnerabilities } = audit.metadata;
@@ -75,10 +79,18 @@ export async function auditDependencies(projectPath, spinner) {
 
   spinner.text = 'Checking outdated packages...';
   try {
-    const output = execSync('npm outdated --json 2>/dev/null', { cwd: projectPath, timeout: 30000 }).toString();
-    const outdated = JSON.parse(output);
+    const { stdout } = await execAsync('npm outdated --json', { cwd: projectPath, timeout: 30000, maxBuffer: 50 * 1024 * 1024 });
+    const outdated = JSON.parse(stdout);
     if (Object.keys(outdated).length > 10) {
       addFinding('LOW', 'Dependencies', `${Object.keys(outdated).length} outdated packages`, 'Outdated packages may contain unpatched security vulnerabilities', 'Run: npm update');
     }
-  } catch {}
+  } catch (err) {
+    // npm outdated exits non-zero when packages are outdated, parse from stdout if present
+    try {
+      const outdated = JSON.parse(err.stdout || '{}');
+      if (Object.keys(outdated).length > 10) {
+        addFinding('LOW', 'Dependencies', `${Object.keys(outdated).length} outdated packages`, 'Outdated packages may contain unpatched security vulnerabilities', 'Run: npm update');
+      }
+    } catch {}
+  }
 }

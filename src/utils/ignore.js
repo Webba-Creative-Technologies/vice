@@ -38,12 +38,10 @@ function globToRegex(pattern) {
   return new RegExp(regex);
 }
 
-export function loadViceignore(projectPath) {
+export async function loadViceignore(projectPath) {
   const ignorePath = path.join(projectPath, '.viceignore');
-  if (!fs.existsSync(ignorePath)) return () => false;
-
   let content;
-  try { content = fs.readFileSync(ignorePath, 'utf-8'); } catch { return () => false; }
+  try { content = await fs.promises.readFile(ignorePath, 'utf-8'); } catch { return () => false; }
 
   const patterns = content
     .split('\n')
