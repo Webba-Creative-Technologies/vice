@@ -20,13 +20,16 @@ const DATA_DIR = getViceDataDir();
 const DISCLAIMER_FILE = path.join(DATA_DIR, '.vice-accepted');
 
 import { LOCAL_MODULES, runLocalAudit } from '../src/local/index.js';
-import { getFindings, clearFindings, loadFindings } from '../src/core/findings.js';
+import { getFindings, clearFindings, loadFindings, setFindings } from '../src/core/findings.js';
 import { calculateScore, severityColor } from '../src/core/score.js';
 import { printReport } from '../src/core/reporter/console.js';
 import { exportJson } from '../src/core/reporter/json.js';
 import { exportHtml } from '../src/core/reporter/html.js';
-import { buildSarif } from '../src/core/reporter/sarif.js';
+import { buildSarif, enrichWithTaxonomy } from '../src/core/reporter/sarif.js';
 import { writeBadgeFile, readReportFile, findLatestReport } from '../src/core/badge.js';
+import { loadBaseline, writeBaseline, applyBaseline, getBaselinePath } from '../src/core/baseline.js';
+import { loadConfig, applyTransform, loadCustomModules } from '../src/core/config.js';
+import { fingerprintFinding } from '../src/core/fingerprint.js';
 
 // ──────────── BANNER ────────────
 
@@ -195,14 +198,26 @@ async function runAuditMode() {
 
   const resolved = path.resolve(projectPath);
 
+  // Load config + custom modules first so they appear in the inquirer choices
+  const config = await loadConfig(resolved);
+  const extraModules = config && config.moduleFiles.length
+    ? await loadCustomModules(resolved, config.moduleFiles)
+    : [];
+  const allChoices = [...LOCAL_MODULES, ...extraModules];
+  const enabledChoices = config && config.disabledModules.length
+    ? allChoices.filter(m => !config.disabledModules.includes(m.value))
+    : allChoices;
+
   const { modules } = await inquirer.prompt([{
     type: 'checkbox', name: 'modules',
     message: chalk.bold('Modules to run:'),
-    choices: LOCAL_MODULES.map(m => ({ name: m.name, value: m.value, checked: true })),
+    choices: enabledChoices.map(m => ({ name: m.name, value: m.value, checked: true })),
   }]);
 
   clearFindings();
-  await runLocalAudit(resolved, modules);
+  await runLocalAudit(resolved, modules, { parallel: false, extraModules });
+  applyConfigTransform(config);
+  applyProjectBaseline(resolved);
   printReport(`Local audit — ${path.basename(resolved)}`);
 
   await exportJson(resolved, DATA_DIR);
@@ -213,19 +228,19 @@ async function runAuditMode() {
 
 // ──────────── SCAN MODE ────────────
 
-async function runScanMode() {
+async function runScanMode(options = {}) {
   const scanPath = path.join(PKG_DIR, 'scan.js');
   if (!fs.existsSync(scanPath)) {
     console.log(chalk.red('  scan.js not found. Place it in the VICE root directory.'));
     return;
   }
   const { main: scanMain } = await import(pathToFileURL(scanPath).href);
-  await scanMain();
+  await scanMain(options);
 }
 
 // ──────────── CI MODE ────────────
 
-async function runCiMode(target, minScore = 70) {
+async function runCiMode(target, minScore = 70, options = {}) {
   clearFindings();
   const resolved = path.resolve(target);
   if (!fs.existsSync(resolved)) {
@@ -233,12 +248,14 @@ async function runCiMode(target, minScore = 70) {
     process.exit(1);
   }
 
-  const allModules = LOCAL_MODULES.map(m => m.value);
-  await runLocalAudit(resolved, allModules);
-  printReport(`CI Audit — ${path.basename(resolved)}`);
+  const { modules, extraModules, config } = await prepareModules(resolved);
+  await runLocalAudit(resolved, modules, { parallel: true, extraModules });
+  applyConfigTransform(config);
+  applyProjectBaseline(resolved, options);
+  printReport(`CI Audit — ${path.basename(resolved)}`, { minConfidence: options.minConfidence });
   await exportJson(resolved, DATA_DIR);
 
-  const { score, grade } = calculateScore();
+  const { score, grade } = calculateScore(undefined, { minConfidence: options.minConfidence, minSeverity: options.minSeverity });
   if (score < minScore) {
     console.log(chalk.red(`\n  CI FAILED: Score ${score}/100 (${grade}) < minimum ${minScore}\n`));
     process.exit(1);
@@ -246,6 +263,53 @@ async function runCiMode(target, minScore = 70) {
     console.log(chalk.green(`\n  CI PASSED: Score ${score}/100 (${grade}) >= ${minScore}\n`));
     process.exit(0);
   }
+}
+
+// Apply .vice-baseline.json to the in-memory findings, unless --no-baseline.
+// Logs a single line to stderr so it shows up in CI logs without polluting JSON output.
+function applyProjectBaseline(resolved, options = {}) {
+  if (options.useBaseline === false) return;
+  const baseline = loadBaseline(resolved);
+  if (!baseline) return;
+  applyBaseline(getFindings(), baseline);
+  const total = Object.keys(baseline.findings || {}).length;
+  process.stderr.write(`VICE: baseline applied (${total} finding(s) suppressed) from ${getBaselinePath(resolved)}\n`);
+}
+
+// Resolve which modules to run, honoring vice.config.js disabledModules
+// and merging custom modules declared in cfg.modules.
+// Returns { modules, extraModules, config } - call before runLocalAudit.
+async function prepareModules(resolved) {
+  const config = await loadConfig(resolved);
+  let modules = LOCAL_MODULES.map(m => m.value);
+  let extraModules = [];
+
+  if (config) {
+    if (config.disabledModules.length) {
+      modules = modules.filter(v => !config.disabledModules.includes(v));
+      process.stderr.write(`VICE: ${config.disabledModules.length} module(s) disabled by ${config.sourcePath}\n`);
+    }
+    if (config.moduleFiles.length) {
+      extraModules = await loadCustomModules(resolved, config.moduleFiles);
+      if (extraModules.length > 0) {
+        modules.push(...extraModules.map(m => m.value));
+        process.stderr.write(`VICE: ${extraModules.length} custom module(s) loaded from ${config.sourcePath}\n`);
+      }
+    }
+  }
+
+  return { modules, extraModules, config };
+}
+
+// Apply config.transformFinding to the global findings array (mutates in place).
+// Call after runLocalAudit, before applyProjectBaseline.
+function applyConfigTransform(config) {
+  if (!config || !config.transformFinding) return;
+  const before = getFindings().length;
+  const transformed = applyTransform(getFindings(), config.transformFinding);
+  setFindings(transformed);
+  const dropped = before - transformed.length;
+  if (dropped > 0) process.stderr.write(`VICE: transformFinding dropped ${dropped} finding(s)\n`);
 }
 
 // ──────────── JSON AUDIT MODE (for CI / GitHub Action) ────────────
@@ -272,7 +336,7 @@ function readPkgVersion() {
   }
 }
 
-async function runJsonAuditMode(target, minScore) {
+async function runJsonAuditMode(target, minScore, options = {}) {
   // Redirect all stdout writes to stderr during the audit so the final JSON
   // is the only thing written to stdout. Spinner output (ora) and console.log
   // calls from modules will all land on stderr.
@@ -299,11 +363,13 @@ async function runJsonAuditMode(target, minScore) {
     }
 
     clearFindings();
-    const allModules = LOCAL_MODULES.map(m => m.value);
-    await runLocalAudit(resolved, allModules);
+    const { modules, extraModules, config } = await prepareModules(resolved);
+    await runLocalAudit(resolved, modules, { parallel: true, extraModules });
+    applyConfigTransform(config);
+    applyProjectBaseline(resolved, options);
 
     const findings = getFindings();
-    const { score, grade } = calculateScore();
+    const { score, grade } = calculateScore(undefined, { minConfidence: options.minConfidence, minSeverity: options.minSeverity });
 
     // Best-effort: still save to history so the file is available locally
     try { await exportJson(resolved, DATA_DIR); } catch {}
@@ -315,7 +381,7 @@ async function runJsonAuditMode(target, minScore) {
       score,
       grade,
       summary: buildSummary(findings),
-      findings,
+      findings: enrichWithTaxonomy(findings),
     };
 
     const exitCode = (minScore !== null && score < minScore) ? 1 : 0;
@@ -327,7 +393,7 @@ async function runJsonAuditMode(target, minScore) {
 
 // ──────────── SARIF AUDIT MODE (for CI / GitHub code scanning) ────────────
 
-async function runSarifMode(target, minScore, outputPath) {
+async function runSarifMode(target, minScore, outputPath, options = {}) {
   // Redirect all stdout writes to stderr during the audit so the final SARIF
   // is the only thing written to stdout (when no outputPath is given).
   const originalWrite = process.stdout.write.bind(process.stdout);
@@ -373,11 +439,13 @@ async function runSarifMode(target, minScore, outputPath) {
     }
 
     clearFindings();
-    const allModules = LOCAL_MODULES.map(m => m.value);
-    await runLocalAudit(resolved, allModules);
+    const { modules, extraModules, config } = await prepareModules(resolved);
+    await runLocalAudit(resolved, modules, { parallel: true, extraModules });
+    applyConfigTransform(config);
+    applyProjectBaseline(resolved, options);
 
     const findings = getFindings();
-    const { score } = calculateScore();
+    const { score } = calculateScore(undefined, { minConfidence: options.minConfidence, minSeverity: options.minSeverity });
 
     // Best-effort: still save the JSON history locally
     try { await exportJson(resolved, DATA_DIR); } catch {}
@@ -419,6 +487,170 @@ async function runBadgeCommand(args) {
   }
 }
 
+// ──────────── DIFF COMMAND ────────────
+
+async function runDiffCommand(args) {
+  const oldPath = args[1];
+  const newPath = args[2];
+  const jsonMode = args.includes('--json');
+  const markdownMode = args.includes('--markdown') || args.includes('--md');
+
+  if (!oldPath || !newPath || oldPath.startsWith('--') || newPath.startsWith('--')) {
+    console.error(chalk.red('  Usage: vice diff <old.json> <new.json> [--json|--markdown]'));
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(oldPath)) {
+    console.error(chalk.red(`  File not found: ${oldPath}`));
+    process.exit(1);
+  }
+  if (!fs.existsSync(newPath)) {
+    console.error(chalk.red(`  File not found: ${newPath}`));
+    process.exit(1);
+  }
+
+  let oldReport, newReport;
+  try { oldReport = JSON.parse(fs.readFileSync(oldPath, 'utf-8')); }
+  catch (err) { console.error(chalk.red(`  Failed to parse ${oldPath}: ${err.message}`)); process.exit(1); }
+  try { newReport = JSON.parse(fs.readFileSync(newPath, 'utf-8')); }
+  catch (err) { console.error(chalk.red(`  Failed to parse ${newPath}: ${err.message}`)); process.exit(1); }
+
+  const oldFps = new Map();
+  for (const f of oldReport.findings || []) oldFps.set(fingerprintFinding(f), f);
+  const newFps = new Map();
+  for (const f of newReport.findings || []) newFps.set(fingerprintFinding(f), f);
+
+  const added = [];
+  const removed = [];
+  let unchanged = 0;
+  for (const [fp, f] of newFps) {
+    if (oldFps.has(fp)) unchanged++;
+    else added.push(f);
+  }
+  for (const [fp, f] of oldFps) {
+    if (!newFps.has(fp)) removed.push(f);
+  }
+
+  const scoreOld = oldReport.score ?? 0;
+  const scoreNew = newReport.score ?? 0;
+  const delta = scoreNew - scoreOld;
+
+  // Sort by severity (severest first)
+  const sevOrder = { CRITICAL: 0, CRITIQUE: 0, HIGH: 1, ELEVEE: 1, MEDIUM: 2, MOYENNE: 2, LOW: 3, FAIBLE: 3, INFO: 4 };
+  const sortBySev = (a, b) => (sevOrder[a.severity] ?? 5) - (sevOrder[b.severity] ?? 5);
+  added.sort(sortBySev);
+  removed.sort(sortBySev);
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify({
+      scoreOld,
+      scoreNew,
+      scoreDelta: delta,
+      gradeOld: oldReport.grade || null,
+      gradeNew: newReport.grade || null,
+      added,
+      removed,
+      unchangedCount: unchanged,
+    }, null, 2) + '\n');
+    return;
+  }
+
+  if (markdownMode) {
+    const lines = [];
+    lines.push(`## VICE Diff`);
+    lines.push('');
+    lines.push(`**Score:** ${scoreOld} (${oldReport.grade || '?'}) → ${scoreNew} (${newReport.grade || '?'}) (${delta >= 0 ? '+' : ''}${delta})`);
+    lines.push('');
+    if (added.length) {
+      lines.push(`### Added (${added.length})`);
+      lines.push('');
+      for (const f of added) lines.push(`- **${f.severity}** ${f.module}: ${f.title}`);
+      lines.push('');
+    }
+    if (removed.length) {
+      lines.push(`### Removed (${removed.length})`);
+      lines.push('');
+      for (const f of removed) lines.push(`- **${f.severity}** ${f.module}: ${f.title}`);
+      lines.push('');
+    }
+    lines.push(`Unchanged: ${unchanged}`);
+    process.stdout.write(lines.join('\n') + '\n');
+    return;
+  }
+
+  // Human-readable
+  console.log('');
+  console.log(chalk.bold('━'.repeat(60)));
+  console.log(chalk.hex('#995ff6').bold('  VICE Diff'));
+  console.log(chalk.gray(`  ${oldPath} → ${newPath}`));
+  console.log(chalk.bold('━'.repeat(60)));
+  console.log('');
+  const deltaStr = delta > 0 ? chalk.green(`+${delta}`) : delta < 0 ? chalk.red(`${delta}`) : chalk.gray('0');
+  console.log(`  Score: ${scoreOld} (${oldReport.grade || '?'}) → ${scoreNew} (${newReport.grade || '?'})  (${deltaStr})`);
+  console.log('');
+
+  if (added.length === 0 && removed.length === 0) {
+    console.log(chalk.green('  No findings changed.\n'));
+    return;
+  }
+
+  if (added.length) {
+    console.log(chalk.red.bold(`  Added (${added.length}):`));
+    for (const f of added) {
+      console.log(`    ${severityColor(f.severity)} ${chalk.bold(f.module)} — ${f.title}`);
+    }
+    console.log('');
+  }
+  if (removed.length) {
+    console.log(chalk.green.bold(`  Removed (${removed.length}):`));
+    for (const f of removed) {
+      console.log(`    ${severityColor(f.severity)} ${chalk.bold(f.module)} — ${f.title}`);
+    }
+    console.log('');
+  }
+  console.log(chalk.gray(`  Unchanged: ${unchanged}\n`));
+}
+
+// ──────────── BASELINE COMMAND ────────────
+
+async function runBaselineCommand(target) {
+  printBanner();
+  await checkDisclaimer();
+  const resolved = path.resolve(target || '.');
+  if (!fs.existsSync(resolved)) {
+    console.log(chalk.red(`  Path not found: ${resolved}`));
+    process.exit(1);
+  }
+
+  const existing = loadBaseline(resolved);
+  if (existing) {
+    console.log(chalk.yellow(`  An existing baseline was found at ${getBaselinePath(resolved)}`));
+    console.log(chalk.gray(`  Created: ${existing.created || 'unknown'} (vice ${existing.vice_version || 'unknown'})`));
+    const { overwrite } = await inquirer.prompt([{
+      type: 'confirm', name: 'overwrite',
+      message: 'Overwrite with current scan?', default: false,
+    }]);
+    if (!overwrite) {
+      console.log(chalk.gray('  Aborted.\n'));
+      return;
+    }
+  }
+
+  console.log(chalk.gray('\n  Running audit to capture current findings...\n'));
+  clearFindings();
+  const { modules, extraModules, config } = await prepareModules(resolved);
+  await runLocalAudit(resolved, modules, { parallel: false, extraModules });
+  applyConfigTransform(config);
+
+  const findings = getFindings();
+  const blocking = findings.filter(f => f.severity !== 'INFO');
+  const file = writeBaseline(resolved, findings, readPkgVersion());
+
+  console.log(chalk.green(`\n  Baseline written: ${file}`));
+  console.log(chalk.gray(`  ${blocking.length} finding(s) snapshotted as known.`));
+  console.log(chalk.gray(`  Commit ${path.basename(file)} to git: future scans will only flag NEW issues.\n`));
+}
+
 // ──────────── MAIN ────────────
 
 async function main() {
@@ -440,11 +672,19 @@ async function main() {
       const outputIdx = args.indexOf('--output');
       const outputPath = outputIdx !== -1 ? args[outputIdx + 1] : null;
 
+      // Phase 2 flags: baseline & confidence filtering
+      const useBaseline = !args.includes('--no-baseline');
+      const confIdx = args.indexOf('--min-confidence');
+      const minConfidence = confIdx !== -1 ? args[confIdx + 1] : 'low';
+      const sevIdx = args.indexOf('--severity-min');
+      const minSeverity = sevIdx !== -1 ? args[sevIdx + 1] : null;
+      const options = { useBaseline, minConfidence, minSeverity };
+
       // SARIF mode: clean stdout SARIF output for machine consumption / GitHub code scanning
       if (sarifMode) {
         const minIdx = args.indexOf('--min-score');
         const minScore = minIdx !== -1 ? parseInt(args[minIdx + 1]) : (ciMode ? 70 : null);
-        await runSarifMode(target, minScore, outputPath);
+        await runSarifMode(target, minScore, outputPath, options);
         return;
       }
 
@@ -452,7 +692,7 @@ async function main() {
       if (jsonMode) {
         const minIdx = args.indexOf('--min-score');
         const minScore = minIdx !== -1 ? parseInt(args[minIdx + 1]) : (ciMode ? 70 : null);
-        await runJsonAuditMode(target, minScore);
+        await runJsonAuditMode(target, minScore, options);
         return;
       }
 
@@ -462,23 +702,39 @@ async function main() {
       if (ciMode) {
         const minIdx = args.indexOf('--min-score');
         const minScore = minIdx !== -1 ? parseInt(args[minIdx + 1]) : 70;
-        await runCiMode(target, minScore);
+        await runCiMode(target, minScore, options);
         return;
       }
       clearFindings();
       const resolved = path.resolve(target);
-      const allModules = LOCAL_MODULES.map(m => m.value);
-      await runLocalAudit(resolved, allModules);
-      printReport(`Local audit — ${path.basename(resolved)}`);
+      const { modules, extraModules, config } = await prepareModules(resolved);
+      await runLocalAudit(resolved, modules, { parallel: false, extraModules });
+      applyConfigTransform(config);
+      applyProjectBaseline(resolved, options);
+      printReport(`Local audit — ${path.basename(resolved)}`, { minConfidence });
       await exportJson(resolved, DATA_DIR);
       console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' — Audit complete.\n'));
+      return;
+    }
+
+    if (command === 'baseline') {
+      const target = args[1] && !args[1].startsWith('--') ? args[1] : '.';
+      await runBaselineCommand(target);
       return;
     }
 
     if (command === 'scan') {
       printBanner();
       await checkDisclaimer();
-      await runScanMode();
+      const cookieIdx = args.indexOf('--auth-cookie');
+      const headerIdx = args.indexOf('--auth-header');
+      const urlIdx = args.indexOf('--url');
+      const scanOptions = {
+        authCookie: cookieIdx !== -1 ? args[cookieIdx + 1] : null,
+        authHeader: headerIdx !== -1 ? args[headerIdx + 1] : null,
+        url: urlIdx !== -1 ? args[urlIdx + 1] : (args[1] && !args[1].startsWith('--') ? args[1] : null),
+      };
+      await runScanMode(scanOptions);
       return;
     }
 
@@ -493,6 +749,11 @@ async function main() {
       return;
     }
 
+    if (command === 'diff') {
+      await runDiffCommand(args);
+      return;
+    }
+
     // Help
     console.log(chalk.bold('\n  VICE — Vulnerability Inspector & Code Examiner\n'));
     console.log('  Usage:');
@@ -502,10 +763,19 @@ async function main() {
     console.log('    vice audit [path] --ci --json        Machine-readable JSON output to stdout');
     console.log('    vice audit [path] --ci --format sarif');
     console.log('         [--output results.sarif]        SARIF v2.1.0 output for GitHub code scanning');
-    console.log('    vice audit . --ci --min-score 80');
+    console.log('    vice audit . --ci --min-score 80     Custom score threshold');
+    console.log('    vice audit . --no-baseline           Ignore .vice-baseline.json');
+    console.log('    vice audit . --min-confidence high   Only flag high-confidence findings');
+    console.log('    vice audit . --severity-min HIGH     Only count CRITICAL+HIGH toward score');
+    console.log('    vice scan <url> --auth-cookie "session=abc;remember=xyz"');
+    console.log('    vice scan <url> --auth-header "Authorization: Bearer xxx"');
+    console.log('    vice baseline [path]                 Snapshot current findings into .vice-baseline.json');
+    console.log('    vice diff <old.json> <new.json>      Compare two scan reports');
+    console.log('         [--json|--markdown]');
     console.log('    vice badge --input <report.json>     Generate shields.io badge from a report');
     console.log('         [--output .github/vice-badge.json]');
     console.log('    vice history                         View saved scan reports\n');
+    console.log('  Optional: vice.config.js at project root for transformFinding/disabledModules.\n');
     return;
   }
 
