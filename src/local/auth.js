@@ -6,37 +6,36 @@
 import fs from 'fs';
 import path from 'path';
 import { addFinding } from '../core/findings.js';
+import { isInComment } from '../utils/comments.js';
 
-function findFiles(dir, extensions, ignore = ['node_modules', '.git', '.next', '.nuxt', 'dist', 'build', '.output', 'coverage', 'scans']) {
+async function findFiles(dir, extensions, ignore = ['node_modules', '.git', '.next', '.nuxt', 'dist', 'build', '.output', 'coverage', 'scans']) {
   const results = [];
-  function walk(d) {
+  async function walk(d) {
     let entries;
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    try { entries = await fs.promises.readdir(d, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       if (ignore.includes(entry.name)) continue;
       const full = path.join(d, entry.name);
-      if (entry.isDirectory()) walk(full);
+      if (entry.isDirectory()) await walk(full);
       else if (extensions.some(ext => entry.name.endsWith(ext))) results.push(full);
     }
   }
-  walk(dir);
+  await walk(dir);
   return results;
 }
 
 export async function auditAuth(projectPath, spinner, isIgnored = () => false) {
   spinner.text = 'Auditing auth & middleware configuration...';
-  const codeFiles = findFiles(projectPath, ['.js', '.ts', '.jsx', '.tsx', '.vue', '.svelte']);
+  const codeFiles = await findFiles(projectPath, ['.js', '.ts', '.jsx', '.tsx', '.vue', '.svelte']);
 
   let hasRateLimit = false, hasCors = false, hasCsrf = false, hasHelmet = false, hasAuthMiddleware = false;
 
   const pkgPath = path.join(projectPath, 'package.json');
   let deps = {};
-  if (fs.existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-      deps = { ...pkg.dependencies, ...pkg.devDependencies };
-    } catch {}
-  }
+  try {
+    const pkg = JSON.parse(await fs.promises.readFile(pkgPath, 'utf-8'));
+    deps = { ...pkg.dependencies, ...pkg.devDependencies };
+  } catch {}
 
   if (deps['helmet']) hasHelmet = true;
   if (deps['express-rate-limit'] || deps['rate-limiter-flexible'] || deps['limiter']) hasRateLimit = true;
@@ -45,7 +44,7 @@ export async function auditAuth(projectPath, spinner, isIgnored = () => false) {
 
   for (const filePath of codeFiles) {
     let content;
-    try { content = fs.readFileSync(filePath, 'utf-8'); } catch { continue; }
+    try { content = await fs.promises.readFile(filePath, 'utf-8'); } catch { continue; }
     const rel = path.relative(projectPath, filePath);
 
     if (/rateLimit|rate.?limit|throttle|RateLimiter/i.test(content)) hasRateLimit = true;
@@ -73,10 +72,11 @@ export async function auditAuth(projectPath, spinner, isIgnored = () => false) {
       addFinding('HIGH', 'Auth & Middleware', `JWT without expiration in ${rel}`, 'A JWT without expiration is valid forever if stolen', 'Add expiresIn: \'1h\' or \'7d\' to jwt.sign() options');
     }
 
-    if (!/test|example|placeholder|mock|fixture|i18n|locales?|translations?|lang|languages/i.test(rel) && !isIgnored(rel)) {
+    if (!/test|spec|example|sample|placeholder|mock|fixture|e2e|cypress|playwright|seed|seeds|demo|stories|storybook|i18n|locales?|translations?|lang|languages|\.cy\.|\.pw\./i.test(rel) && !isIgnored(rel)) {
       const pwRegex = /password\s*[:=]\s*["']([^"']{4,})["']/gi;
       let pwMatch;
       while ((pwMatch = pwRegex.exec(content)) !== null) {
+        if (isInComment(content, pwMatch.index, rel)) continue;
         const val = pwMatch[1];
         if (/\s/.test(val)) continue;
         if (/^password$/i.test(val)) continue;
