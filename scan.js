@@ -392,6 +392,11 @@ function analyzeScripts(jsContents, spinner) {
 
   // Track already seen JWTs to avoid anon/service_role duplicates
   const seenJwts = new Set();
+  // Track values matched by specific (non-Generic) secret patterns so the
+  // Generic API Key / Generic Secret patterns don't double-flag the same value.
+  // For example, a Firebase key "AIzaSy..." should not also fire as Generic
+  // API Key just because it sits next to `apiKey:`.
+  const specificMatches = new Set();
 
   for (const js of jsContents) {
     for (const pattern of SECRET_PATTERNS) {
@@ -405,13 +410,42 @@ function analyzeScripts(jsContents, spinner) {
           // Filter out environment variable references (not actual secrets)
           if (/process\.env\.|import\.meta\.env\.|os\.environ|getenv\(|ENV\[|System\.getenv/i.test(match)) continue;
 
-          // For Generic patterns, check surrounding context for env var references
+          // For Generic patterns, several context-based filters
           if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
+            // 1. Skip if surrounded by an env-var reference
             const matchIndex = js.indexOf(match);
             if (matchIndex !== -1) {
               const context = js.substring(Math.max(0, matchIndex - 50), matchIndex + match.length + 50);
               if (/process\.env|import\.meta\.env|os\.environ|getenv|ENV\[|System\.getenv|config\[|Config\./i.test(context)) continue;
             }
+            // 2. Skip if the captured value looks like an identifier (snake_case,
+            //    camelCase, kebab-case) rather than a high-entropy secret.
+            //    Real secrets have mixed alphanumerics and special chars; names
+            //    like "fetch_client_secret" or "stripeWebhookKey" are variables.
+            const valueMatch = match.match(/["']([a-zA-Z0-9_\-!@#$%^&*]{8,})["']?$|[\s:=]([a-zA-Z0-9_\-]{16,})$/);
+            const value = valueMatch ? (valueMatch[1] || valueMatch[2] || '') : '';
+            if (value) {
+              const looksLikeIdentifier = /^[a-z]+(?:[_-][a-z]+){1,}$|^[a-z]+(?:[A-Z][a-z]+){1,}$/.test(value);
+              if (looksLikeIdentifier) continue;
+              // 3. Skip if value is too low-entropy (no digit, no mixed case)
+              const hasDigit = /\d/.test(value);
+              const hasUpper = /[A-Z]/.test(value);
+              const hasLower = /[a-z]/.test(value);
+              if (!hasDigit && !(hasUpper && hasLower)) continue;
+            }
+          }
+
+          // Skip if the same value already matched a more specific pattern.
+          // A Firebase key (AIzaSy...) or Stripe key (sk_live_...) shouldn't
+          // also fire as Generic API Key. The specific match string is shorter
+          // (just the key) and the Generic one wraps it with "apiKey:..." etc,
+          // so we check by substring.
+          if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
+            let alreadyDetected = false;
+            for (const known of specificMatches) {
+              if (known.length >= 16 && match.includes(known)) { alreadyDetected = true; break; }
+            }
+            if (alreadyDetected) continue;
           }
 
           // JWT deduplication (same anon key detected as service_role)
@@ -434,6 +468,10 @@ function analyzeScripts(jsContents, spinner) {
           const key = `${pattern.name}::${match.substring(0, 60)}`;
           if (!found.has(key)) {
             found.set(key, true);
+            // Record this match so subsequent Generic patterns can dedup against it
+            if (pattern.name !== 'Generic API Key' && pattern.name !== 'Generic Secret') {
+              specificMatches.add(match);
+            }
             let sev = 'ELEVEE';
             if (pattern.name.includes('Private') || pattern.name === 'Stripe Secret Key' || pattern.name === 'AWS Secret Key') {
               sev = 'CRITIQUE';
@@ -512,6 +550,7 @@ function analyzeScripts(jsContents, spinner) {
     if (matches) {
       for (const api of matches) {
         if (api.length < 8 || api.length > 200) continue;
+        if (!isUsableApiEndpoint(api)) continue;
         if (!apiFound.has(api)) {
           apiFound.add(api);
         }
@@ -521,6 +560,25 @@ function analyzeScripts(jsContents, spinner) {
   if (apiFound.size > 0) {
     addFinding('INFO', 'API Endpoints', `${apiFound.size} API endpoint(s) detected`, [...apiFound].slice(0, 15).join('\n'), 'Verify that each endpoint requires appropriate authentication');
   }
+}
+
+// Filter out URLs that look like documentation, anchors, template literals,
+// or otherwise non-callable. Used by both the JS analysis and the API audit
+// modules to avoid testing third-party doc pages and unresolved templates.
+function isUsableApiEndpoint(url) {
+  // Anchor URLs (documentation links with #section)
+  if (url.includes('#')) return false;
+  // Unresolved template literals like {prefix}, ${var}, <slug>
+  if (/\{[a-zA-Z_][a-zA-Z0-9_]*\}|\$\{|\<[a-z_]+\>/.test(url)) return false;
+  // Documentation paths: /docs/, /documentation/, /reference/, /api-docs/, /swagger/
+  if (/\/docs?\/|\/documentation\/|\/reference\/|\/api-docs?\b|\/swagger(?:-ui)?\b/i.test(url)) return false;
+  // Known documentation domains - we don't want to extract their /api/ examples
+  const docHosts = ['docs.stripe.com', 'stripe.com', 'developer.mozilla.org', 'developer.apple.com', 'developers.google.com', 'cloud.google.com', 'docs.aws.amazon.com', 'docs.github.com', 'docs.microsoft.com', 'learn.microsoft.com', 'api.slack.com', 'docs.cleavr.io'];
+  try {
+    const u = new URL(url, 'http://x');
+    if (u.hostname && docHosts.some(h => u.hostname === h || u.hostname.endsWith('.' + h))) return false;
+  } catch {}
+  return true;
 }
 
 // ──────────── MODULE 3 : Sensitive Files ────────────
@@ -548,11 +606,16 @@ async function checkSensitivePaths(baseUrl, spinner) {
 
       // Verify this is not just a custom 404 page or a SPA responding 200 to everything
       if (body.length < 10) continue;
-      // If the size matches the fake 404 page or the homepage, it is a catch-all SPA
-      if (fakeSize > 0 && Math.abs(body.length - fakeSize) < 50) continue;
-      if (homeSize > 0 && Math.abs(body.length - homeSize) < 50) continue;
-      // If it is HTML for a file that should not be HTML, it is the SPA
-      if (contentType.includes('text/html') && (path.endsWith('.env') || path.endsWith('.json') || path.endsWith('.php') || path.endsWith('.git/config') || path.endsWith('.DS_Store'))) continue;
+      // If the size is close to the fake-404 or the home page, treat as SPA catch-all.
+      // Threshold widened to 250 bytes because i18n SPAs (Next.js, Nuxt) vary the
+      // shell content slightly per route while still serving the same app shell.
+      if (fakeSize > 0 && Math.abs(body.length - fakeSize) < 250) continue;
+      if (homeSize > 0 && Math.abs(body.length - homeSize) < 250) continue;
+      // HTML response on a path that should never be HTML => SPA catch-all.
+      // Generalized regex covers .env.local / .env.production / .env.development,
+      // .htaccess, server.js, /api/, /.well-known/, and any .git/ subpath.
+      const looksNonHtml = /\.(?:env|json|php|sh|key|pem|sql|conf|cfg|log|bak|asp|aspx|jsp|cgi)(?:\.[a-z0-9]+)?$|\/\.git\/|\/\.htaccess$|\/\.DS_Store$|\/server\.(?:js|ts|py|php|rb|go)$|^\/api\/?$|^\/\.well-known\/?$/i.test(path);
+      if (contentType.includes('text/html') && looksNonHtml) continue;
 
       let sev = 'MOYENNE';
       if (path.includes('.env') || path.includes('.git') || path.includes('wp-config')) sev = 'CRITIQUE';
@@ -606,17 +669,31 @@ async function checkHeaders(baseUrl, spinner) {
   // HTTP -> HTTPS redirect check is handled by the SSL/TLS scenario in
   // auditAttackScenarios (scenario 6) - avoid double-flagging the same issue.
 
-  // Check cookies
+  // Check cookies. Severity scales with the cookie's sensitivity: a session /
+  // auth / token cookie missing HttpOnly is critical (XSS theft), but a
+  // preference cookie like NEXT_LOCALE or theme=dark must remain JS-readable.
   const setCookie = headers.get('set-cookie');
   if (setCookie) {
+    // Cookie name = first segment before '='
+    const cookieName = setCookie.split(/[=;]/, 1)[0].trim();
+    const isSensitive = /session|token|auth|jwt|sid|csrf|supabase|access|refresh|connect\.sid|laravel_session/i.test(cookieName);
+    const isPreference = /locale|lang|theme|color|consent|preference|tz|timezone/i.test(cookieName);
+
     if (!setCookie.includes('HttpOnly')) {
-      addFinding('ELEVEE', 'Cookies', 'Cookie without HttpOnly flag', `Set-Cookie: ${setCookie.substring(0, 80)}...`, 'Add the HttpOnly flag to sensitive cookies');
+      if (isSensitive) {
+        addFinding('ELEVEE', 'Cookies', `Sensitive cookie "${cookieName}" without HttpOnly flag`, `Set-Cookie: ${setCookie.substring(0, 120)}\nAccessible via document.cookie - stealable by XSS.`, 'Add the HttpOnly flag to sensitive cookies (session, auth, token).');
+      } else if (!isPreference) {
+        addFinding('FAIBLE', 'Cookies', `Cookie "${cookieName}" without HttpOnly flag`, `Set-Cookie: ${setCookie.substring(0, 120)}\nIf this cookie is not used by client-side JS, add HttpOnly for defense in depth.`, 'Add HttpOnly if the cookie is not read from JavaScript.');
+      }
+      // Preference cookies (locale, theme, etc.) MUST be JS-readable: skip.
     }
-    if (!setCookie.includes('Secure')) {
-      addFinding('ELEVEE', 'Cookies', 'Cookie without Secure flag', `Set-Cookie: ${setCookie.substring(0, 80)}...`, 'Add the Secure flag to cookies');
+    if (!setCookie.includes('Secure') && new URL(baseUrl).protocol === 'https:') {
+      const sev = isSensitive ? 'ELEVEE' : 'FAIBLE';
+      addFinding(sev, 'Cookies', `Cookie "${cookieName}" without Secure flag`, `Set-Cookie: ${setCookie.substring(0, 120)}`, 'Add the Secure flag so the cookie is only sent over HTTPS.');
     }
     if (!setCookie.includes('SameSite')) {
-      addFinding('MOYENNE', 'Cookies', 'Cookie without SameSite flag', `Set-Cookie: ${setCookie.substring(0, 80)}...`, 'Add SameSite=Strict or SameSite=Lax');
+      const sev = isSensitive ? 'MOYENNE' : 'FAIBLE';
+      addFinding(sev, 'Cookies', `Cookie "${cookieName}" without SameSite flag`, `Set-Cookie: ${setCookie.substring(0, 120)}`, 'Add SameSite=Lax (or Strict for highly sensitive cookies).');
     }
   }
 }
@@ -1379,7 +1456,16 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
         clearTimeout(timeout);
         const location = res.headers.get('location') || '';
 
-        if (location.includes('evil-attacker-site.com')) {
+        // True open redirect: the Location header resolves to a different origin.
+        // A relative redirect like "/fr?redirect=https://evil..." that just
+        // preserves the query parameter is NOT an open redirect.
+        let redirectsExternally = false;
+        try {
+          const resolved = new URL(location, testUrl);
+          const targetOrigin = new URL(baseUrl).origin;
+          redirectsExternally = resolved.origin !== targetOrigin && resolved.hostname.includes('evil-attacker-site.com');
+        } catch {}
+        if (redirectsExternally) {
           addFinding('CRITIQUE', 'Open Redirect', `Open redirect detected via parameter "${param}"`, `URL: ${testUrl}\nRedirects to: ${location}\nAn attacker can create a link that appears to come from your site but redirects to a phishing site.`, 'Validate redirect URLs server-side. Only allow redirections to your own domain.');
           redirectFound = true;
           break;
@@ -2713,15 +2799,29 @@ async function auditDns(baseUrl, spinner) {
   } catch {}
 
   // ── Dangling CNAME ──
+  // A truly dangling CNAME is one whose target DOMAIN is unregistered (NXDOMAIN),
+  // letting an attacker register it and take over. HTTP 404 is NOT enough -
+  // many legitimate CNAME targets (Vercel DNS validators *.vercel-dns-XXX.com,
+  // Cloudflare Pages targets, GitHub Pages, etc.) intentionally don't serve HTTP.
   spinner.text = 'Checking for dangling CNAMEs...';
+  const resolveAny = promisify(dns.default.resolve);
   const subsToCcheck = ['www', 'api', 'app', 'cdn', 'mail', 'staging', 'dev'];
   for (const sub of subsToCcheck) {
     try {
       const cnames = await resolveCname(`${sub}.${baseDomain}`);
       for (const cname of cnames) {
-        const cnameRes = await safeFetch(`http://${cname}`);
-        if (!cnameRes || cnameRes.status === 404) {
-          addFinding('ELEVEE', 'DNS / Email', `Dangling CNAME detected: ${sub}.${baseDomain}`, `CNAME points to ${cname} which does not respond.\nAn attacker can register this domain and take over the subdomain (subdomain takeover).`, `Remove the CNAME ${sub}.${baseDomain} → ${cname} or configure the destination`);
+        // Try to resolve the CNAME target to A/AAAA records.
+        // ENOTFOUND / NXDOMAIN means the domain is unregistered = dangling.
+        let domainResolves = true;
+        try {
+          await resolveAny(cname);
+        } catch (err) {
+          if (err && (err.code === 'ENOTFOUND' || err.code === 'NXDOMAIN' || err.code === 'SERVFAIL')) {
+            domainResolves = false;
+          }
+        }
+        if (!domainResolves) {
+          addFinding('ELEVEE', 'DNS / Email', `Dangling CNAME detected: ${sub}.${baseDomain}`, `CNAME points to ${cname} which does not resolve (NXDOMAIN).\nAn attacker can register this domain and take over the subdomain (subdomain takeover).`, `Remove the CNAME ${sub}.${baseDomain} → ${cname} or configure the destination`);
         }
       }
     } catch {}
@@ -2875,7 +2975,7 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
     const matches = js.match(apiPatterns);
     if (matches) {
       for (const match of matches) {
-        if (match.length >= 6 && match.length <= 200) {
+        if (match.length >= 6 && match.length <= 200 && isUsableApiEndpoint(match)) {
           // Normalize
           let endpoint = match;
           if (endpoint.startsWith('/')) {
@@ -2976,15 +3076,24 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
       addFinding('MOYENNE', 'API Audit', `Endpoint ${endpoint} accepts dangerous methods`, `Methods: ${methodsAccepted.join(', ')}`, 'Restrict HTTP methods to only those needed');
     }
 
-    // ── Test 4 : Parameter injection ──
-    const sqlRes = await safeFetch(`${endpoint}?id=' OR '1'='1&q=' UNION SELECT 1--`, {
-      headers: { 'Content-Type': 'application/json' },
-    });
-    if (sqlRes) {
-      let sqlBody = '';
-      try { sqlBody = await sqlRes.text(); } catch {}
-      if (/sql|syntax|mysql|postgresql|sqlite|query|unterminated/i.test(sqlBody)) {
-        addFinding('CRITIQUE', 'API Audit', `Possible SQL injection on ${endpoint}`, `The server returns a SQL error when payloads are injected into parameters`, 'Use prepared queries on all API endpoints');
+    // ── Test 4 : Parameter injection (only against same-origin endpoints) ──
+    // We never pen-test third-party APIs (Google Maps, Stripe, etc.) - their
+    // documentation pages contain words like "query" that would false-positive.
+    let endpointOrigin;
+    try { endpointOrigin = new URL(endpoint).origin; } catch { endpointOrigin = null; }
+    if (endpointOrigin && endpointOrigin === new URL(baseUrl).origin) {
+      const sqlRes = await safeFetch(`${endpoint}?id=' OR '1'='1&q=' UNION SELECT 1--`, {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (sqlRes) {
+        let sqlBody = '';
+        try { sqlBody = await sqlRes.text(); } catch {}
+        // Use specific SQL error signatures rather than the bare word "sql" or
+        // "query" (which match any documentation page or generic error text).
+        const sqlErrorRegex = /(?:You have an error in your SQL syntax|Warning:\s+mysqli?_|near\s+'[^']*'\s+at line\s+\d+|Unknown column\s+'[^']+'|MySQLSyntaxErrorException|pq:\s+ERROR|ERROR:.*?at character\s+\d+|LINE\s+\d+:\s|unterminated quoted string at or near|relation\s+"[^"]+"\s+does not exist|column\s+"[^"]+"\s+does not exist|syntax error at or near\s+"|sqlite3?\.OperationalError|near\s+"[^"]+":\s+syntax error|unrecognized token:|no such table:|no such column:|ORA-\d{5}|microsoft (?:sql|ole db|odbc)|sqlclient|system\.data\.sqlclient|SQLSTATE\[\d+\])/i;
+        if (sqlErrorRegex.test(sqlBody)) {
+          addFinding('CRITIQUE', 'API Audit', `Possible SQL injection on ${endpoint}`, `The server returns a SQL error when payloads are injected into parameters`, 'Use prepared queries on all API endpoints');
+        }
       }
     }
 
