@@ -1,6 +1,6 @@
 {
   "name": "vice-security",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "VICE - Vulnerability Inspector & Code Examiner | Black-box & white-box security auditor for web applications",
   "author": "Webba Creative Technologies",
   "license": "MIT",
