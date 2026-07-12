@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE — JSON Reporter
+// VICE - JSON Reporter
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
@@ -8,6 +8,7 @@ import path from 'path';
 import chalk from 'chalk';
 import { getFindings } from '../findings.js';
 import { calculateScore } from '../score.js';
+import { ENGINE_VERSION, RULESET_VERSION, SCORING_VERSION } from '../version.js';
 
 export async function exportJson(url, baseDir) {
   const { score, grade } = calculateScore();
@@ -17,6 +18,9 @@ export async function exportJson(url, baseDir) {
   const filename = path.join(dir, `vice-report-${hostname}-${Date.now()}.json`);
   fs.writeFileSync(filename, JSON.stringify({
     url, date: new Date().toISOString(), score, grade,
+    engine_version: ENGINE_VERSION,
+    ruleset_version: RULESET_VERSION,
+    scoring_version: SCORING_VERSION,
     findings: getFindings(),
   }, null, 2));
   console.log(chalk.gray(`  Rapport JSON sauvegarde: ${filename}\n`));

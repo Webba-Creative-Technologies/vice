@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // ──────────────────────────────────────────────
-// VICE — CLI Entry Point
+// VICE - CLI Entry Point
 // Vulnerability Inspector & Code Examiner v3.0
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
@@ -30,6 +30,7 @@ import { writeBadgeFile, readReportFile, findLatestReport } from '../src/core/ba
 import { loadBaseline, writeBaseline, applyBaseline, getBaselinePath } from '../src/core/baseline.js';
 import { loadConfig, applyTransform, loadCustomModules } from '../src/core/config.js';
 import { fingerprintFinding } from '../src/core/fingerprint.js';
+import { ENGINE_VERSION } from '../src/core/version.js';
 
 // ──────────── BANNER ────────────
 
@@ -43,7 +44,7 @@ function printBanner() {
   console.log(chalk.hex('#995ff6').bold('   ╚████╔╝ ██║╚██████╗███████╗'));
   console.log(chalk.hex('#995ff6').bold('    ╚═══╝  ╚═╝ ╚═════╝╚══════╝'));
   console.log(chalk.gray('  Vulnerability Inspector & Code Examiner'));
-  console.log(chalk.gray('  Black-Box & White-Box Security Auditor v3.0'));
+  console.log(chalk.gray(`  Black-Box & White-Box Security Auditor v${ENGINE_VERSION}`));
   console.log('');
   console.log(chalk.hex('#6366f1').bold('  ┌─────────────────────────────────────────┐'));
   console.log(chalk.hex('#6366f1').bold('  │') + chalk.white.bold('  Webba Creative Technologies') + chalk.gray('  (c) 2026') + chalk.hex('#6366f1').bold('  │'));
@@ -144,7 +145,7 @@ async function viewHistory() {
     message: chalk.bold('Select a scan:'),
     choices: [
       ...scans.map((s, i) => ({
-        name: `${gradeColor(s.grade)} ${s.score}/100 — ${s.target} — ${s.date} — ${s.nbFindings} findings`,
+        name: `${gradeColor(s.grade)} ${s.score}/100 - ${s.target} - ${s.date} - ${s.nbFindings} findings`,
         value: i,
       })),
       new inquirer.Separator(),
@@ -158,7 +159,7 @@ async function viewHistory() {
   const scan = scans[selectedScan];
   clearFindings();
   loadFindings(scan.data.findings);
-  printReport(`Saved scan — ${scan.target} — ${scan.date}`);
+  printReport(`Saved scan - ${scan.target} - ${scan.date}`);
 
   const { postAction } = await inquirer.prompt([{
     type: 'list', name: 'postAction', message: 'Action:',
@@ -218,12 +219,12 @@ async function runAuditMode() {
   await runLocalAudit(resolved, modules, { parallel: false, extraModules });
   applyConfigTransform(config);
   applyProjectBaseline(resolved);
-  printReport(`Local audit — ${path.basename(resolved)}`);
+  printReport(`Local audit - ${path.basename(resolved)}`);
 
   await exportJson(resolved, DATA_DIR);
   const { wantHtml } = await inquirer.prompt([{ type: 'confirm', name: 'wantHtml', message: 'Export HTML report?', default: false }]);
   if (wantHtml) await exportHtml(resolved, DATA_DIR);
-  console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' — Audit complete.\n'));
+  console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' - Audit complete.\n'));
 }
 
 // ──────────── SCAN MODE ────────────
@@ -252,7 +253,7 @@ async function runCiMode(target, minScore = 70, options = {}) {
   await runLocalAudit(resolved, modules, { parallel: true, extraModules });
   applyConfigTransform(config);
   applyProjectBaseline(resolved, options);
-  printReport(`CI Audit — ${path.basename(resolved)}`, { minConfidence: options.minConfidence });
+  printReport(`CI Audit - ${path.basename(resolved)}`, { minConfidence: options.minConfidence });
   await exportJson(resolved, DATA_DIR);
 
   const { score, grade } = calculateScore(undefined, { minConfidence: options.minConfidence, minSeverity: options.minSeverity });
@@ -597,14 +598,14 @@ async function runDiffCommand(args) {
   if (added.length) {
     console.log(chalk.red.bold(`  Added (${added.length}):`));
     for (const f of added) {
-      console.log(`    ${severityColor(f.severity)} ${chalk.bold(f.module)} — ${f.title}`);
+      console.log(`    ${severityColor(f.severity)} ${chalk.bold(f.module)} - ${f.title}`);
     }
     console.log('');
   }
   if (removed.length) {
     console.log(chalk.green.bold(`  Removed (${removed.length}):`));
     for (const f of removed) {
-      console.log(`    ${severityColor(f.severity)} ${chalk.bold(f.module)} — ${f.title}`);
+      console.log(`    ${severityColor(f.severity)} ${chalk.bold(f.module)} - ${f.title}`);
     }
     console.log('');
   }
@@ -711,9 +712,9 @@ async function main() {
       await runLocalAudit(resolved, modules, { parallel: false, extraModules });
       applyConfigTransform(config);
       applyProjectBaseline(resolved, options);
-      printReport(`Local audit — ${path.basename(resolved)}`, { minConfidence });
+      printReport(`Local audit - ${path.basename(resolved)}`, { minConfidence });
       await exportJson(resolved, DATA_DIR);
-      console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' — Audit complete.\n'));
+      console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' - Audit complete.\n'));
       return;
     }
 
@@ -755,7 +756,7 @@ async function main() {
     }
 
     // Help
-    console.log(chalk.bold('\n  VICE — Vulnerability Inspector & Code Examiner\n'));
+    console.log(chalk.bold('\n  VICE - Vulnerability Inspector & Code Examiner\n'));
     console.log('  Usage:');
     console.log('    vice scan                            Remote scan (black-box, URL)');
     console.log('    vice audit [path]                    Local audit (white-box, source code)');
@@ -790,8 +791,8 @@ async function mainMenu() {
     type: 'list', name: 'action',
     message: chalk.bold('What would you like to do?'),
     choices: [
-      { name: 'Remote scan (black-box) — enter a URL', value: 'scan' },
-      { name: 'Local audit (white-box) — scan a project', value: 'audit' },
+      { name: 'Remote scan (black-box) - enter a URL', value: 'scan' },
+      { name: 'Local audit (white-box) - scan a project', value: 'audit' },
       { name: 'View scan history', value: 'history' },
       new inquirer.Separator(),
       { name: 'Exit', value: 'exit' },

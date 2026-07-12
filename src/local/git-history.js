@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — Git History Secret Scan
+// VICE LOCAL - Git History Secret Scan
 // Scans recent commits for previously committed secrets that may still be
 // recoverable from git history even after being removed from current files.
 // Webba Creative Technologies (c) 2026
@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { addFinding } from '../core/findings.js';
-import { SECRET_PATTERNS } from '../utils/patterns.js';
+import { isPlaceholderSecret, SECRET_PATTERNS } from '../utils/patterns.js';
 
 // Async spawn wrapper: collects stdout, returns { code, stdout, error }.
 // No shell, args are passed directly so there's no command-injection surface.
@@ -48,16 +48,24 @@ const HIGH_CONF_PATTERN_NAMES = new Set([
   'Stripe Secret Key',
   'Stripe Publishable Key',
   'AWS Access Key',
+  'AWS Temporary Access Key',
   'AWS Secret Key',
   'Firebase API Key',
   'GitHub Token',
+  'GitHub Fine-grained Token',
+  'GitLab Token',
+  'npm Token',
+  'PyPI Token',
+  'Slack Token',
+  'SendGrid API Key',
+  'Twilio Auth Token',
+  'Database Credential URL',
   'Supabase Service Role',
-  'Supabase Anon Key',
+  'Discord Webhook',
   'Private Key',
   'Google OAuth',
 ]);
 
-const PLACEHOLDER_REGEX = /your_|example|placeholder|xxx|yyy|zzz|changeme|replace_|INSERT_|TODO|FIXME|sk_test_|pk_test_/i;
 const ENV_REF_REGEX = /process\.env\.|import\.meta\.env\.|os\.environ|getenv\(|System\.getenv/i;
 
 export async function auditGitHistory(projectPath, spinner) {
@@ -120,7 +128,8 @@ export async function auditGitHistory(projectPath, spinner) {
       if (!matches) continue;
 
       for (const match of matches) {
-        if (PLACEHOLDER_REGEX.test(match)) continue;
+        if (pattern.validate && !pattern.validate(match)) continue;
+        if (isPlaceholderSecret(match)) continue;
         if (ENV_REF_REGEX.test(match)) continue;
         if (seenSecrets.has(match)) continue;
 
@@ -128,9 +137,8 @@ export async function auditGitHistory(projectPath, spinner) {
 
         let sev = 'HIGH';
         if (pattern.name === 'Stripe Secret Key' || pattern.name === 'AWS Secret Key' ||
-            pattern.name === 'Supabase Service Role' || pattern.name.includes('Private')) sev = 'CRITICAL';
-        else if (pattern.name.includes('Publishable') || pattern.name === 'Supabase Anon Key' ||
-                 pattern.name === 'Firebase API Key' || pattern.name === 'Google OAuth') sev = 'INFO';
+            pattern.name === 'Supabase Service Role' || pattern.name === 'Database Credential URL' || pattern.name.includes('Private')) sev = 'CRITICAL';
+        else if (pattern.name.includes('Publishable') || pattern.name === 'Firebase API Key' || pattern.name === 'Google OAuth') sev = 'INFO';
 
         const confidence = sev === 'CRITICAL' || sev === 'HIGH' ? 'high' : 'medium';
 

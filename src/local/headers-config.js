@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — Security Headers Config Audit
+// VICE LOCAL - Security Headers Config Audit
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 

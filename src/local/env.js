@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — Environment Files Audit
+// VICE LOCAL - Environment Files Audit
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
@@ -10,7 +10,11 @@ import { addFinding } from '../core/findings.js';
 export async function auditEnvFiles(projectPath, spinner) {
   spinner.text = 'Auditing environment files...';
 
-  const envFiles = ['.env', '.env.local', '.env.production', '.env.development', '.env.staging', '.env.test'];
+  const defaultEnvFiles = ['.env', '.env.local', '.env.production', '.env.development', '.env.staging', '.env.test'];
+  let rootEntries = [];
+  try { rootEntries = await fs.promises.readdir(projectPath); } catch {}
+  const discoveredEnvFiles = rootEntries.filter((name) => /^\.env(?:\.[a-z0-9_-]+)*(?:\.example|\.sample)?$/i.test(name));
+  const envFiles = [...new Set([...defaultEnvFiles, ...discoveredEnvFiles])];
   const gitignorePath = path.join(projectPath, '.gitignore');
 
   let gitignoreContent = '';

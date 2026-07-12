@@ -3,6 +3,53 @@ import ora from 'ora';
 import inquirer from 'inquirer';
 import puppeteer from 'puppeteer';
 import { getViceDataDir } from './src/utils/paths.js';
+import { ALL_MODULES, DEFAULT_LIBRARY_MODULES, PASSIVE_MODULES } from './src/core/modules.js';
+import { createScanMetrics } from './src/core/metrics.js';
+import { classifyCorsPolicy } from './src/core/detectors/cors.js';
+import { classifyCsrfEvidence, classifyStoredInputSurface } from './src/core/detectors/forms.js';
+import { classifyHardeningSignal } from './src/core/detectors/hardening.js';
+import { classifyPublicJson } from './src/core/detectors/public-json.js';
+import { classifyAuthenticatedSupabaseRead, classifySupabaseRead, COMMON_SENSITIVE_TABLE_CANDIDATES, extractSupabaseTableCandidates, normalizeSupabaseSchemaTables } from './src/core/detectors/supabase.js';
+import { classifySignupResponse } from './src/core/detectors/signup.js';
+import { classifySupabaseJwt, extractAssignedSecretValue, isPlaceholderSecret, isPublicSupabaseAnonMatch, SECRET_PATTERNS } from './src/utils/patterns.js';
+import { createHttpClient, safeFetch, withHttpClient } from './src/core/http-client.js';
+import { mapWithConcurrency } from './src/core/concurrency.js';
+import { boundedAdd, boundedPush } from './src/core/budget.js';
+import { classifySetCookie, getSetCookieHeaders } from './src/core/detectors/cookies.js';
+import { analyzeSourceMap } from './src/core/detectors/source-map.js';
+import { classifyGraphqlAliasResponse, classifyGraphqlBatchResponse, classifyGraphqlDepthResponse } from './src/core/detectors/graphql.js';
+import { classifyTlsAuthorization, classifyTlsPublicKey } from './src/core/detectors/tls.js';
+import { classifyTimingSamples } from './src/core/detectors/timing.js';
+import { classifyRateLimitEvidence } from './src/core/detectors/rate-limit.js';
+import { analyzeJwt, findJwtCandidates } from './src/core/detectors/jwt.js';
+import { summarizeCoverage } from './src/core/coverage.js';
+import { escapeHtml } from './src/core/reporter/escape.js';
+import { createScanContext, getScanContext, withScanContext } from './src/core/scan-context.js';
+import { createScopePolicy } from './src/core/scope.js';
+import { installScopedRequestInterception } from './src/core/browser-scope.js';
+import { appendFinding } from './src/core/findings.js';
+import { calculateScore as calculateCoreScore } from './src/core/score.js';
+import { ENGINE_VERSION, RULESET_VERSION, SCORING_VERSION } from './src/core/version.js';
+import { classifySensitiveFile } from './src/core/detectors/sensitive-file.js';
+import { classifyHttpOnlySubdomain, classifyOpenService } from './src/core/detectors/open-service.js';
+import { classifyDkimSearch } from './src/core/detectors/dns-email.js';
+import { classifyWordpressSurface } from './src/core/detectors/wordpress.js';
+import { createSupabaseCanary } from './src/core/canary.js';
+import { classifyUnauthenticatedApiResponse, findMassAssignmentSurfaces } from './src/core/detectors/api-schema.js';
+import { classifyTraceResponse } from './src/core/detectors/http-methods.js';
+import { classifyWebSocketMessages, redactWebSocketUrl } from './src/core/detectors/websocket.js';
+import { resolveFirstPartyApiEndpoint } from './src/core/detectors/api-endpoint.js';
+
+const DISCOVERY_BUDGETS = Object.freeze({
+  scriptUrls: 150,
+  scriptSources: 180,
+  sourceCharacters: 2 * 1024 * 1024,
+  apiEndpoints: 200,
+  storageUrls: 100,
+  bucketNames: 100,
+  websocketUrls: 50,
+  websocketActive: 12,
+});
 
 // ─────────────────────────────────────────────
 // VICE - Vulnerability Inspector & Code Examiner
@@ -18,40 +65,21 @@ const SENSITIVE_PATHS = [
   '/.git/config', '/.git/HEAD',
   '/wp-config.php', '/config.json', '/package.json',
   '/.DS_Store',
-  '/.htaccess', '/server.js', '/api/', '/.well-known/',
-  '/graphql', '/admin', '/debug', '/phpinfo.php',
-  '/_next/static/', '/static/js/',
-];
-
-const SECRET_PATTERNS = [
-  { name: 'Supabase URL',           regex: /https?:\/\/[a-z0-9\-]+\.supabase\.co/gi },
-  { name: 'Supabase Anon Key',      regex: /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g },
-  { name: 'Stripe Secret Key',      regex: /sk_(live|test)_[a-zA-Z0-9]{20,}/g },
-  { name: 'Stripe Publishable Key', regex: /pk_(live|test)_[a-zA-Z0-9]{20,}/g },
-  { name: 'AWS Access Key',         regex: /AKIA[0-9A-Z]{16}/g },
-  { name: 'AWS Secret Key',         regex: /(?:aws_secret|secret_key|secretAccessKey)[\s:="']+[a-zA-Z0-9\/+=]{30,}/gi },
-  { name: 'Firebase API Key',       regex: /AIza[0-9A-Za-z_-]{35}/g },
-  { name: 'Google OAuth',           regex: /[0-9]+-[a-z0-9_]{32}\.apps\.googleusercontent\.com/g },
-  { name: 'GitHub Token',           regex: /gh[pousr]_[A-Za-z0-9_]{36,}/g },
-  { name: 'Generic API Key',        regex: /(?:api[_-]?key|apikey|api_secret)[\s:="']+[a-zA-Z0-9_\-]{16,}/gi },
-  { name: 'Generic Secret',         regex: /(?:secret|passwd|pwd)[\s]*[=:][\s]*["'][a-zA-Z0-9_\-!@#$%^&*]{8,}["']/gi },
-  { name: 'Supabase Service Role', regex: /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]{50,}\.[a-zA-Z0-9_-]+/g },
-  { name: 'Private Key',            regex: /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/g },
-  { name: 'Bearer Token',           regex: /Bearer\s+[a-zA-Z0-9_\-\.]+/g },
+  '/.htaccess', '/server.js', '/phpinfo.php',
 ];
 
 const IP_PATTERN = /(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)(?::\d{2,5})?(?!\d)/g;
 
 const SECURITY_HEADERS = [
-  { name: 'Strict-Transport-Security', severity: 'ELEVEE' },
-  // Content-Security-Policy handled by CSP Bypass module (Scenario 8) — avoids double counting
-  // X-Frame-Options handled by Clickjacking module (Scenario 1) — avoids double counting
+  { name: 'Strict-Transport-Security', severity: 'MOYENNE' },
+  // Content-Security-Policy handled by CSP Bypass module (Scenario 8) - avoids double counting
+  // X-Frame-Options handled by Clickjacking module (Scenario 1) - avoids double counting
   { name: 'X-Content-Type-Options',    severity: 'MOYENNE' },
   { name: 'Referrer-Policy',           severity: 'FAIBLE' },
   { name: 'Permissions-Policy',        severity: 'FAIBLE' },
 ];
 
-// Server header handled by Stack Detection module — avoids double counting
+// Server header handled by Stack Detection module - avoids double counting
 const LEAK_HEADERS = ['X-Powered-By', 'X-AspNet-Version', 'X-AspNetMvc-Version'];
 
 const findings = [];
@@ -63,15 +91,17 @@ const discoveredIps = new Set();
 let AUTH_CONTEXT = null;
 
 async function applyAuth(page, baseUrl) {
-  if (!AUTH_CONTEXT) return;
+  const scanContext = getScanContext();
+  const authContext = scanContext?.authContext || AUTH_CONTEXT;
+  if (!authContext) return;
   try {
-    if (Array.isArray(AUTH_CONTEXT.cookies) && AUTH_CONTEXT.cookies.length) {
+    if (Array.isArray(authContext.cookies) && authContext.cookies.length) {
       const url = baseUrl || 'http://localhost/';
-      const cookies = AUTH_CONTEXT.cookies.map(c => ({ name: c.name, value: c.value, url }));
+      const cookies = authContext.cookies.map(c => ({ name: c.name, value: c.value, url }));
       await page.setCookie(...cookies);
     }
-    if (AUTH_CONTEXT.headers && Object.keys(AUTH_CONTEXT.headers).length) {
-      await page.setExtraHTTPHeaders(AUTH_CONTEXT.headers);
+    if (!scanContext?.scope && authContext.headers && Object.keys(authContext.headers).length) {
+      await page.setExtraHTTPHeaders(authContext.headers);
     }
   } catch {}
 }
@@ -100,8 +130,58 @@ function parseAuthString(cookieStr, headerStr) {
   return (ctx.cookies.length || Object.keys(ctx.headers).length) ? ctx : null;
 }
 
-function addFinding(severity, module, title, detail, recommendation) {
-  findings.push({ severity, module, title, detail, recommendation });
+function addFinding(severity, module, title, detail, recommendation, metadata = {}) {
+  const target = getScanContext()?.findings || findings;
+  appendFinding(target, { severity, module, title, detail, recommendation, ...metadata });
+}
+
+async function launchBrowser() {
+  const context = getScanContext();
+  if (context?.signal?.aborted) throw context.signal.reason || new Error('scan_cancelled');
+  const args = ['--disable-dev-shm-usage'];
+  if (process.env.VICE_DISABLE_CHROMIUM_SANDBOX === '1') {
+    args.push('--no-sandbox', '--disable-setuid-sandbox');
+  }
+  const browser = await puppeteer.launch({ headless: true, args });
+  if (context) {
+    context.browsers.add(browser);
+    if (context.signal) {
+      context.signal.addEventListener('abort', () => {
+        browser.close().catch(() => {});
+      }, { once: true });
+    }
+  }
+  return browser;
+}
+
+async function createBrowserPage(browser, baseUrl, options = {}) {
+  const page = await browser.newPage();
+  const context = getScanContext();
+  if (context?.scope) {
+    await installScopedRequestInterception(page, {
+      scope: context.scope,
+      signal: context.signal,
+      metrics: context.browserMetrics,
+      authHeaders: options.authenticated ? context.authContext?.headers : null,
+    });
+  }
+  if (options.authenticated) await applyAuth(page, baseUrl);
+  return page;
+}
+
+async function authorizeDiscoveredDestination(value) {
+  const scope = getScanContext()?.scope;
+  if (!scope) return true;
+  try {
+    if (scope.isHostAllowed(new URL(value).hostname)) {
+      await scope.assertUrl(value, { reusePinned: true });
+    } else {
+      await scope.authorizeDiscoveredUrl(value, { reusePinned: true });
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function severityColor(sev) {
@@ -109,51 +189,56 @@ function severityColor(sev) {
   return (map[sev] || chalk.white)(` ${sev} `);
 }
 
-async function safeFetch(url, opts = {}) {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(url, { ...opts, signal: controller.signal, redirect: 'follow' });
-    clearTimeout(timeout);
-    return res;
-  } catch {
-    return null;
-  }
-}
-
 // ──────────── MODULE 1 : Crawl & Extract JS (Puppeteer) ────────────
 
-async function crawlAndExtract(baseUrl, spinner) {
+async function crawlAndExtract(baseUrl, spinner, options = {}) {
+  const reportFindings = options.reportFindings !== false;
   spinner.text = 'Launching headless browser...';
 
   let browser;
   try {
-    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    browser = await launchBrowser();
   } catch (err) {
-    addFinding('CRITIQUE', 'Crawl', 'Unable to launch browser', err.message, 'Verify that Puppeteer/Chromium is properly installed');
+    if (reportFindings) addFinding('CRITIQUE', 'Crawl', 'Unable to launch browser', err.message, 'Verify that Puppeteer/Chromium is properly installed');
     return { scripts: [], html: '', pageUrls: [] };
   }
 
-  const page = await browser.newPage();
+  const page = await createBrowserPage(browser, baseUrl, { authenticated: true });
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-  await applyAuth(page, baseUrl);
 
   // Intercept all JS requests loaded by the browser
   const scriptUrls = new Set();
+  const pendingScriptReads = new Set();
   const scriptContents = [];
+  const addScriptSource = source => boundedPush(
+    scriptContents,
+    String(source || '').slice(0, DISCOVERY_BUDGETS.sourceCharacters),
+    DISCOVERY_BUDGETS.scriptSources,
+  );
 
-  page.on('response', async (response) => {
+  const captureScriptResponse = async (response) => {
     try {
       const url = response.url();
       const contentType = response.headers()['content-type'] || '';
       if (contentType.includes('javascript') || url.endsWith('.js')) {
-        if (!scriptUrls.has(url)) {
-          scriptUrls.add(url);
+        if (!scriptUrls.has(url) && boundedAdd(scriptUrls, url, DISCOVERY_BUDGETS.scriptUrls)) {
           const text = await response.text().catch(() => '');
-          if (text.length > 10) scriptContents.push(text);
+          if (text.length > 10) {
+            addScriptSource(text);
+          }
         }
       }
     } catch {}
+  };
+  const drainScriptReads = async () => {
+    while (pendingScriptReads.size > 0) {
+      await Promise.allSettled([...pendingScriptReads]);
+    }
+  };
+  page.on('response', (response) => {
+    const task = captureScriptResponse(response);
+    pendingScriptReads.add(task);
+    task.finally(() => pendingScriptReads.delete(task));
   });
 
   // Navigate to the page
@@ -161,7 +246,7 @@ async function crawlAndExtract(baseUrl, spinner) {
   try {
     await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
   } catch (err) {
-    addFinding('CRITIQUE', 'Crawl', 'Site unreachable', `Unable to load ${baseUrl}: ${err.message}`, 'Verify that the site is online');
+    if (reportFindings) addFinding('CRITIQUE', 'Crawl', 'Site unreachable', `Unable to load ${baseUrl}: ${err.message}`, 'Verify that the site is online');
     await browser.close();
     return { scripts: [], html: '', pageUrls: [] };
   }
@@ -180,20 +265,41 @@ async function crawlAndExtract(baseUrl, spinner) {
     window.scrollTo(0, 0);
   });
   await new Promise(r => setTimeout(r, 2000));
+  await drainScriptReads();
 
   // Retrieve the fully rendered DOM
   spinner.text = 'Extracting the rendered DOM...';
-  const html = await page.content();
-  const domText = await page.evaluate(() => document.documentElement.innerHTML);
-  scriptContents.push(domText);
+  const html = (await page.content()).slice(0, DISCOVERY_BUDGETS.sourceCharacters);
+  const domText = await page.evaluate(limit => document.documentElement.innerHTML.slice(0, limit), DISCOVERY_BUDGETS.sourceCharacters);
+  addScriptSource(domText);
 
   // Retrieve inline scripts from the DOM
   const inlineScripts = await page.evaluate(() => {
     return [...document.querySelectorAll('script:not([src])')]
-      .map(s => s.textContent)
+      .slice(0, 25)
+      .map(s => s.textContent.slice(0, 512 * 1024))
       .filter(t => t && t.length > 10);
   });
-  scriptContents.push(...inlineScripts);
+  for (const inlineScript of inlineScripts) addScriptSource(inlineScript);
+
+  // Browser response events are asynchronous and can otherwise finish after
+  // the analysis starts. Fetch declared bundles deterministically as a fallback.
+  const declaredScriptUrls = await page.evaluate(() => {
+    return [...document.querySelectorAll('script[src], link[rel="modulepreload"][href]')]
+      .map(element => element.src || element.href)
+      .filter(Boolean)
+      .sort();
+  });
+  for (const scriptUrl of declaredScriptUrls) {
+    if (!scriptUrls.has(scriptUrl) && !boundedAdd(scriptUrls, scriptUrl, DISCOVERY_BUDGETS.scriptUrls)) continue;
+    if (!await authorizeDiscoveredDestination(scriptUrl)) continue;
+    const scriptResponse = await safeFetch(scriptUrl);
+    if (!scriptResponse || scriptResponse.status !== 200) continue;
+    const text = await scriptResponse.text().catch(() => '');
+    if (text.length > 10) {
+      addScriptSource(text);
+    }
+  }
 
   // ── Storage audit: localStorage / sessionStorage ──
   // Tokens kept here are accessible to any script on the page (XSS theft vector).
@@ -202,38 +308,40 @@ async function crawlAndExtract(baseUrl, spinner) {
     const storage = await page.evaluate(() => {
       const dump = (s) => {
         const out = {};
-        for (let i = 0; i < s.length; i++) {
+        for (let i = 0; i < Math.min(s.length, 100); i++) {
           const k = s.key(i);
-          out[k] = s.getItem(k);
+          out[k] = s.getItem(k)?.slice(0, 50_000);
         }
         return out;
       };
       return { local: dump(localStorage), session: dump(sessionStorage) };
     });
 
-    for (const [where, items] of [['localStorage', storage.local], ['sessionStorage', storage.session]]) {
-      for (const [key, value] of Object.entries(items || {})) {
-        if (!value || typeof value !== 'string' || value.length < 20) continue;
-        // JWT-shaped value
-        const looksLikeJwt = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
-        // Or key name suggests an auth token
-        const tokenishKey = /token|jwt|access|refresh|bearer|auth|session|sid|api[_-]?key/i.test(key);
-        if (!looksLikeJwt && !tokenishKey) continue;
-        addFinding('ELEVEE', 'Storage Security',
-          `Auth token in ${where}: "${key}"`,
-          `Value: ${value.substring(0, 80)}${value.length > 80 ? '...' : ''}\nTokens kept in ${where} are readable by any script on the page. An XSS will exfiltrate them.`,
-          'Store auth tokens in HttpOnly cookies set by the server. Cookies with HttpOnly + Secure + SameSite=Strict cannot be read by JS.');
+    if (reportFindings) {
+      for (const [where, items] of [['localStorage', storage.local], ['sessionStorage', storage.session]]) {
+        for (const [key, value] of Object.entries(items || {})) {
+          if (!value || typeof value !== 'string' || value.length < 20) continue;
+          // JWT-shaped value
+          const looksLikeJwt = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
+          // Or key name suggests an auth token
+          const tokenishKey = /token|jwt|access|refresh|bearer|auth|session|sid|api[_-]?key/i.test(key);
+          if (!looksLikeJwt && !tokenishKey) continue;
+          addFinding('ELEVEE', 'Storage Security',
+            `Auth token in ${where}: "${key}"`,
+            `Value: ${value.substring(0, 80)}${value.length > 80 ? '...' : ''}\nTokens kept in ${where} are readable by any script on the page. An XSS will exfiltrate them.`,
+            'Store auth tokens in HttpOnly cookies set by the server. Cookies with HttpOnly + Secure + SameSite=Strict cannot be read by JS.');
+        }
       }
     }
     // Add storage content to scripts for later secret-pattern matching
-    scriptContents.push('LOCALSTORAGE: ' + JSON.stringify(storage.local));
-    scriptContents.push('SESSIONSTORAGE: ' + JSON.stringify(storage.session));
+    addScriptSource('LOCALSTORAGE: ' + JSON.stringify(storage.local));
+    addScriptSource('SESSIONSTORAGE: ' + JSON.stringify(storage.session));
   } catch {}
 
   // ── Subresource Integrity check on external scripts ──
   // Analytics/tracking CDNs can't realistically use SRI: they rotate their
   // bundle content (sometimes daily) and any pinned hash would break the
-  // tag on the next deploy. Reported at FAIBLE so users see them but they
+  // tag on the next deploy. Reported as information so users see them but they
   // don't get blamed for an impossible mitigation.
   const ANALYTICS_CDN_HOSTS = [
     'clarity.ms', 'googletagmanager.com', 'google-analytics.com', 'gtag',
@@ -244,10 +352,11 @@ async function crawlAndExtract(baseUrl, spinner) {
     'connect.facebook.net', 'snap.licdn.com', 'sc-static.net', 'ads.linkedin.com',
     'static.ads-twitter.com', 'analytics.tiktok.com', 'cdn.cookielaw.org',
   ];
-  spinner.text = 'Checking Subresource Integrity (SRI) on external scripts...';
-  try {
+  if (reportFindings) {
+    spinner.text = 'Checking Subresource Integrity (SRI) on external scripts...';
+    try {
     const externalScripts = await page.evaluate((origin) => {
-      return [...document.querySelectorAll('script[src]')].map(s => ({
+      return [...document.querySelectorAll('script[src]')].slice(0, 100).map(s => ({
         src: s.src,
         integrity: s.integrity || '',
       })).filter(s => {
@@ -262,22 +371,24 @@ async function crawlAndExtract(baseUrl, spinner) {
       const isAnalytics = ANALYTICS_CDN_HOSTS.some(d => host === d || host.endsWith('.' + d) || host.includes(d));
 
       if (isAnalytics) {
-        addFinding('FAIBLE', 'SRI',
+        addFinding('INFO', 'SRI',
           `Analytics script without integrity: ${script.src}`,
           'Tracking and analytics scripts rotate their bundle content frequently, so SRI cannot be applied in practice. Listed for visibility - verify you intend to load this third-party script and that it is required (privacy / GDPR / page weight).',
-          'For analytics scripts, SRI is impractical. Mitigation alternatives: load via a tag manager you control, self-host the script, or use a strict CSP (script-src) that only allows known analytics domains.');
+          'For analytics scripts, SRI is impractical. Mitigation alternatives: load via a tag manager you control, self-host the script, or use a strict CSP (script-src) that only allows known analytics domains.',
+          { classification: 'informational', confidence: 'high' });
         continue;
       }
 
-      addFinding('MOYENNE', 'SRI',
+      addFinding(classifyHardeningSignal('missing-sri').severity, 'SRI',
         `External script without integrity: ${script.src}`,
         'If the CDN or third-party host is compromised, malicious code runs without warning. SRI lets the browser refuse altered files.',
         `Add integrity="sha384-..." to the <script> tag. Generate the hash with:\n  curl -s ${script.src} | openssl dgst -sha384 -binary | openssl base64 -A\nAlso add crossorigin="anonymous".`);
     }
-  } catch {}
+    } catch {}
+  }
 
   // ── Mixed content: HTTP resources on HTTPS page ──
-  if (new URL(baseUrl).protocol === 'https:') {
+  if (reportFindings && new URL(baseUrl).protocol === 'https:') {
     spinner.text = 'Checking for mixed content (HTTP on HTTPS page)...';
     try {
       const mixedResources = await page.evaluate(() => {
@@ -306,20 +417,27 @@ async function crawlAndExtract(baseUrl, spinner) {
   const pageUrls = await page.evaluate((origin) => {
     return [...document.querySelectorAll('a[href]')]
       .map(a => a.href)
-      .filter(href => href.startsWith(origin));
+      .filter(href => href.startsWith(origin))
+      .slice(0, 200);
   }, new URL(baseUrl).origin);
 
   // Test source maps
-  spinner.text = 'Checking source maps...';
-  for (const scriptUrl of scriptUrls) {
+  if (reportFindings) spinner.text = 'Checking source maps...';
+  for (const scriptUrl of reportFindings ? scriptUrls : []) {
     if (!scriptUrl.endsWith('.js')) continue;
     const mapUrl = scriptUrl + '.map';
     const mapRes = await safeFetch(mapUrl);
     if (mapRes && mapRes.status === 200) {
-      const ct = mapRes.headers.get('content-type') || '';
-      if (ct.includes('json') || ct.includes('octet')) {
-        addFinding('CRITIQUE', 'Source Map', 'Source map exposed', `${mapUrl} is publicly accessible`, 'Disable source maps in production or restrict access to them');
-      }
+      const sourceMap = analyzeSourceMap(await mapRes.text());
+      if (!sourceMap) continue;
+      const secretDetail = sourceMap.secretTypes.length > 0 ? `\nCredential types: ${sourceMap.secretTypes.join(', ')}` : '';
+      const pathDetail = sourceMap.sensitiveSources.length > 0 ? `\nSensitive source paths: ${sourceMap.sensitiveSources.join(', ')}` : '';
+      const title = sourceMap.kind === 'credentials'
+        ? 'Source map exposes credential material'
+        : sourceMap.kind === 'sensitive-sources'
+          ? 'Source map embeds sensitive server sources'
+          : 'Source map exposes client source metadata';
+      addFinding(sourceMap.severity, 'Source Map', title, `${mapUrl}\n${sourceMap.sourceCount} source path(s), ${sourceMap.embeddedSourceCount} embedded source file(s).${secretDetail}${pathDetail}`, sourceMap.kind === 'credentials' ? 'Remove and rotate exposed credentials, then rebuild without secrets.' : 'Disable production source maps when source disclosure is not intended.');
     }
   }
 
@@ -336,7 +454,7 @@ async function crawlAndExtract(baseUrl, spinner) {
         const dm = line.match(/^\s*(?:Disallow|Allow):\s*(\S+)/i);
         if (dm) {
           const p = dm[1].trim();
-          if (p && p !== '/' && !p.startsWith('#')) discoveredPaths.add(p);
+          if (p && p !== '/' && !p.startsWith('#')) boundedAdd(discoveredPaths, p, 100);
         }
       }
     }
@@ -353,7 +471,7 @@ async function crawlAndExtract(baseUrl, spinner) {
         try {
           const u = new URL(loc);
           if (u.origin === origin && u.pathname && u.pathname !== '/') {
-            discoveredPaths.add(u.pathname);
+            boundedAdd(discoveredPaths, u.pathname, 100);
           }
         } catch {}
       }
@@ -372,11 +490,12 @@ async function crawlAndExtract(baseUrl, spinner) {
       try {
         await page.goto(subUrl, { waitUntil: 'networkidle2', timeout: 15000 });
         await new Promise(r => setTimeout(r, 2000));
-        const subDom = await page.evaluate(() => document.documentElement.innerHTML);
-        scriptContents.push(subDom);
+        const subDom = await page.evaluate(limit => document.documentElement.innerHTML.slice(0, limit), DISCOVERY_BUDGETS.sourceCharacters);
+        addScriptSource(subDom);
       } catch {}
     }
   }
+  await drainScriptReads();
 
   spinner.text = `${scriptContents.length} sources retrieved (JS + DOM)...`;
   await browser.close();
@@ -392,6 +511,7 @@ function analyzeScripts(jsContents, spinner) {
 
   // Track already seen JWTs to avoid anon/service_role duplicates
   const seenJwts = new Set();
+  const analyzedJwts = new Set();
   // Track values matched by specific (non-Generic) secret patterns so the
   // Generic API Key / Generic Secret patterns don't double-flag the same value.
   // For example, a Firebase key "AIzaSy..." should not also fire as Generic
@@ -399,13 +519,33 @@ function analyzeScripts(jsContents, spinner) {
   const specificMatches = new Set();
 
   for (const js of jsContents) {
+    for (const token of findJwtCandidates(js)) {
+      if (analyzedJwts.has(token)) continue;
+      analyzedJwts.add(token);
+      const analysis = analyzeJwt(token);
+      for (const signal of analysis?.signals || []) {
+        addFinding(
+          signal.severity,
+          'Secrets',
+          signal.title,
+          signal.detail,
+          signal.recommendation,
+          { classification: signal.classification, confidence: signal.confidence },
+        );
+      }
+    }
+
     for (const pattern of SECRET_PATTERNS) {
       const matches = js.match(pattern.regex);
       if (matches) {
         for (const match of matches) {
           // Filter out placeholders, examples, and false positives
-          if (/your_|example|placeholder|xxx|yyy|zzz|changeme|replace_|INSERT_|TODO|FIXME/i.test(match)) continue;
+          if (isPlaceholderSecret(match)) continue;
+          if (pattern.validate && !pattern.validate(match)) continue;
           if (/Bearer\s+(xxx|token|your|example|wbt_xxx|test)/i.test(match)) continue;
+
+          const matchIndex = js.indexOf(match);
+          if (isPublicSupabaseAnonMatch(js, match, matchIndex)) continue;
 
           // Filter out environment variable references (not actual secrets)
           if (/process\.env\.|import\.meta\.env\.|os\.environ|getenv\(|ENV\[|System\.getenv/i.test(match)) continue;
@@ -413,7 +553,6 @@ function analyzeScripts(jsContents, spinner) {
           // For Generic patterns, several context-based filters
           if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
             // 1. Skip if surrounded by an env-var reference
-            const matchIndex = js.indexOf(match);
             if (matchIndex !== -1) {
               const context = js.substring(Math.max(0, matchIndex - 50), matchIndex + match.length + 50);
               if (/process\.env|import\.meta\.env|os\.environ|getenv|ENV\[|System\.getenv|config\[|Config\./i.test(context)) continue;
@@ -441,9 +580,10 @@ function analyzeScripts(jsContents, spinner) {
           // (just the key) and the Generic one wraps it with "apiKey:..." etc,
           // so we check by substring.
           if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
+            const value = extractAssignedSecretValue(match);
             let alreadyDetected = false;
             for (const known of specificMatches) {
-              if (known.length >= 16 && match.includes(known)) { alreadyDetected = true; break; }
+              if (known.length >= 16 && (value === known || match.includes(known) || known.includes(value))) { alreadyDetected = true; break; }
             }
             if (alreadyDetected) continue;
           }
@@ -457,9 +597,7 @@ function analyzeScripts(jsContents, spinner) {
             try {
               const payload = JSON.parse(Buffer.from(match.split('.')[1], 'base64url').toString());
               if (payload.role === 'service_role') {
-                addFinding('CRITIQUE', 'Secrets', 'Supabase Service Role Key detected', `Value: ${match}\nRole: service_role — this key grants FULL access to the database, bypasses all RLS`, 'IMMEDIATELY remove this key from client code. Keep it server-side only.');
-              } else if (payload.role === 'anon') {
-                addFinding('INFO', 'Secrets', 'Supabase Anon Key detected (public by design)', `Value: ${match}\nRole: anon — this key is designed to be public, but verify that RLS are in place`, '');
+                addFinding('CRITIQUE', 'Secrets', 'Supabase Service Role Key detected', `Value: ${match}\nRole: service_role - this key grants FULL access to the database, bypasses all RLS`, 'IMMEDIATELY remove this key from client code. Keep it server-side only.');
               }
               continue;
             } catch {}
@@ -470,22 +608,22 @@ function analyzeScripts(jsContents, spinner) {
             found.set(key, true);
             // Record this match so subsequent Generic patterns can dedup against it
             if (pattern.name !== 'Generic API Key' && pattern.name !== 'Generic Secret') {
-              specificMatches.add(match);
+              specificMatches.add(extractAssignedSecretValue(match));
             }
             let sev = 'ELEVEE';
             if (pattern.name.includes('Private') || pattern.name === 'Stripe Secret Key' || pattern.name === 'AWS Secret Key') {
               sev = 'CRITIQUE';
-            } else if (pattern.name.includes('Publishable') || pattern.name === 'Supabase URL' || pattern.name === 'Firebase API Key' || pattern.name === 'Google OAuth') {
+            } else if (pattern.name.includes('Publishable') || pattern.name === 'Firebase API Key' || pattern.name === 'Google OAuth') {
               sev = 'FAIBLE';
             } else if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
               sev = 'MOYENNE';
             }
 
             const recoMap = {
-              'Supabase URL': 'The Supabase URL is public by design, but verify that RLS are in place',
               'Firebase API Key': 'The Firebase key is public by design, but verify Firebase security rules',
               'Stripe Publishable Key': 'The publishable key is designed to be public. Verify that the SECRET key is not exposed.',
               'Google OAuth': 'The OAuth client ID is public by design. Verify that the secret is not exposed.',
+              'Discord Webhook': 'Remove the webhook URL from client code, recreate the webhook, and keep its token server-side.',
             };
             const reco = recoMap[pattern.name] || 'Move this value to server-side environment variables, never expose secrets in the client bundle';
 
@@ -534,8 +672,15 @@ function analyzeScripts(jsContents, spinner) {
 
         if (!ipFound.has(ip)) {
           ipFound.add(ip);
-          discoveredIps.add(ipBase);
-          addFinding('ELEVEE', 'Exposed IP', 'Server IP address detected', `IP found in a network context: ${ip}`, 'Use a domain name or a reverse proxy to hide the server IP');
+          (getScanContext()?.discoveredIps || discoveredIps).add(ipBase);
+          addFinding(
+            'INFO',
+            'Exposed IP',
+            'Public IP address referenced in client code',
+            `IP found in a network context: ${ip}`,
+            'Confirm that this public address is intentionally exposed.',
+            { classification: 'confirmed', confidence: 'high', rule_id: 'vice/discovery/public-ip-reference' },
+          );
         }
       }
     }
@@ -585,44 +730,52 @@ function isUsableApiEndpoint(url) {
 
 async function checkSensitivePaths(baseUrl, spinner) {
   spinner.text = 'Checking for exposed sensitive files...';
-  let checked = 0;
 
   // First, get the size of the homepage and a fake 404 page for comparison
   const homeRes = await safeFetch(baseUrl);
   const homeSize = homeRes ? (await homeRes.text()).length : 0;
+  const homeType = homeRes?.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() || '';
   const fakeRes = await safeFetch(baseUrl.replace(/\/+$/, '') + '/vice-fake-path-that-does-not-exist-' + Date.now());
   const fakeSize = fakeRes ? (await fakeRes.text()).length : 0;
+  const fakeType = fakeRes?.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() || '';
+  const fakeIsCatchAll = fakeRes?.status === 200;
 
-  for (const path of SENSITIVE_PATHS) {
-    checked++;
-    spinner.text = `Sensitive files [${checked}/${SENSITIVE_PATHS.length}] ${path}`;
+  const checks = await mapWithConcurrency(SENSITIVE_PATHS, 6, async (path, index) => {
+    spinner.text = `Sensitive files [${index + 1}/${SENSITIVE_PATHS.length}] ${path}`;
     const url = baseUrl.replace(/\/+$/, '') + path;
     const res = await safeFetch(url);
-    if (!res) continue;
+    if (!res || res.status !== 200) return null;
 
-    if (res.status === 200) {
-      const contentType = res.headers.get('content-type') || '';
-      const body = await res.text();
+    const contentType = res.headers.get('content-type') || '';
+    const mediaType = contentType.split(';', 1)[0].trim().toLowerCase();
+    const body = await res.text();
 
-      // Verify this is not just a custom 404 page or a SPA responding 200 to everything
-      if (body.length < 10) continue;
-      // If the size is close to the fake-404 or the home page, treat as SPA catch-all.
-      // Threshold widened to 250 bytes because i18n SPAs (Next.js, Nuxt) vary the
-      // shell content slightly per route while still serving the same app shell.
-      if (fakeSize > 0 && Math.abs(body.length - fakeSize) < 250) continue;
-      if (homeSize > 0 && Math.abs(body.length - homeSize) < 250) continue;
-      // HTML response on a path that should never be HTML => SPA catch-all.
-      // Generalized regex covers .env.local / .env.production / .env.development,
-      // .htaccess, server.js, /api/, /.well-known/, and any .git/ subpath.
-      const looksNonHtml = /\.(?:env|json|php|sh|key|pem|sql|conf|cfg|log|bak|asp|aspx|jsp|cgi)(?:\.[a-z0-9]+)?$|\/\.git\/|\/\.htaccess$|\/\.DS_Store$|\/server\.(?:js|ts|py|php|rb|go)$|^\/api\/?$|^\/\.well-known\/?$/i.test(path);
-      if (contentType.includes('text/html') && looksNonHtml) continue;
+    // Verify this is not just a custom 404 page or a SPA responding 200 to everything
+    if (body.length < 10) return null;
+    // If the size is close to the fake-404 or the home page, treat as SPA catch-all.
+    // Threshold widened to 250 bytes because i18n SPAs (Next.js, Nuxt) vary the
+    // shell content slightly per route while still serving the same app shell.
+    if (fakeIsCatchAll && fakeSize > 0 && mediaType === fakeType && Math.abs(body.length - fakeSize) < 250) return null;
+    if (homeSize > 0 && mediaType === homeType && Math.abs(body.length - homeSize) < 250) return null;
+    // HTML response on a path that should never be HTML => SPA catch-all.
+    const looksNonHtml = /\.(?:env|json|sh|key|pem|sql|conf|cfg|log|bak|asp|aspx|jsp|cgi)(?:\.[a-z0-9]+)?$|\/\.git\/|\/\.htaccess$|\/\.DS_Store$|\/server\.(?:js|ts|py|php|rb|go)$/i.test(path);
+    if (contentType.includes('text/html') && looksNonHtml) return null;
 
-      let sev = 'MOYENNE';
-      if (path.includes('.env') || path.includes('.git') || path.includes('wp-config')) sev = 'CRITIQUE';
-      if (path.includes('package.json') || path.includes('.DS_Store')) sev = 'ELEVEE';
+    const signal = classifySensitiveFile(path, body, mediaType);
+    if (!signal) return null;
+    return { ...signal, path, url, contentType, bodyLength: body.length };
+  });
 
-      addFinding(sev, 'Exposed Files', `Sensitive file accessible: ${path}`, `${url} responds with status 200 (${body.length} bytes, content-type: ${contentType})`, `Block access to ${path} via the web server config or .htaccess`);
-    }
+  for (const check of checks) {
+    if (!check) continue;
+    addFinding(
+      check.severity,
+      'Exposed Files',
+      `Confirmed exposed ${check.kind}: ${check.path}`,
+      `${check.url} returned content matching ${check.kind} (${check.bodyLength} bytes, content-type: ${check.contentType})`,
+      `Block access to ${check.path} via the web server configuration.`,
+      { classification: check.classification, confidence: check.confidence, rule_id: `vice/files/${check.kind.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}` },
+    );
   }
 }
 
@@ -635,7 +788,7 @@ async function checkHeaders(baseUrl, spinner) {
 
   const headers = res.headers;
 
-  // Missing security headers (CSP and X-Frame-Options excluded — handled by dedicated modules)
+  // Missing security headers (CSP and X-Frame-Options excluded - handled by dedicated modules)
   for (const h of SECURITY_HEADERS) {
     if (!headers.get(h.name.toLowerCase())) {
       addFinding(h.severity, 'Headers', `Missing security header: ${h.name}`, `The ${h.name} header is not present in the response`, `Add the ${h.name} header in the server configuration`);
@@ -645,7 +798,7 @@ async function checkHeaders(baseUrl, spinner) {
   // Deprecated header check
   const xssProtection = headers.get('x-xss-protection');
   if (xssProtection) {
-    addFinding('INFO', 'Headers', 'Deprecated header present: X-XSS-Protection', `X-XSS-Protection: ${xssProtection}\nThis header is deprecated — Chrome removed the XSS Auditor in 2019. No modern browser supports it.`, 'Remove the X-XSS-Protection header. Use Content-Security-Policy instead.');
+    addFinding('INFO', 'Headers', 'Deprecated header present: X-XSS-Protection', `X-XSS-Protection: ${xssProtection}\nThis header is deprecated - Chrome removed the XSS Auditor in 2019. No modern browser supports it.`, 'Remove the X-XSS-Protection header. Use Content-Security-Policy instead.');
   }
 
   // Headers leaking information
@@ -669,136 +822,137 @@ async function checkHeaders(baseUrl, spinner) {
   // HTTP -> HTTPS redirect check is handled by the SSL/TLS scenario in
   // auditAttackScenarios (scenario 6) - avoid double-flagging the same issue.
 
-  // Check cookies. Severity scales with the cookie's sensitivity: a session /
-  // auth / token cookie missing HttpOnly is critical (XSS theft), but a
-  // preference cookie like NEXT_LOCALE or theme=dark must remain JS-readable.
-  const setCookie = headers.get('set-cookie');
-  if (setCookie) {
-    // Cookie name = first segment before '='
-    const cookieName = setCookie.split(/[=;]/, 1)[0].trim();
-    const isSensitive = /session|token|auth|jwt|sid|csrf|supabase|access|refresh|connect\.sid|laravel_session/i.test(cookieName);
-    const isPreference = /locale|lang|theme|color|consent|preference|tz|timezone/i.test(cookieName);
-
-    if (!setCookie.includes('HttpOnly')) {
-      if (isSensitive) {
-        addFinding('ELEVEE', 'Cookies', `Sensitive cookie "${cookieName}" without HttpOnly flag`, `Set-Cookie: ${setCookie.substring(0, 120)}\nAccessible via document.cookie - stealable by XSS.`, 'Add the HttpOnly flag to sensitive cookies (session, auth, token).');
-      } else if (!isPreference) {
-        addFinding('FAIBLE', 'Cookies', `Cookie "${cookieName}" without HttpOnly flag`, `Set-Cookie: ${setCookie.substring(0, 120)}\nIf this cookie is not used by client-side JS, add HttpOnly for defense in depth.`, 'Add HttpOnly if the cookie is not read from JavaScript.');
-      }
-      // Preference cookies (locale, theme, etc.) MUST be JS-readable: skip.
-    }
-    if (!setCookie.includes('Secure') && new URL(baseUrl).protocol === 'https:') {
-      const sev = isSensitive ? 'ELEVEE' : 'FAIBLE';
-      addFinding(sev, 'Cookies', `Cookie "${cookieName}" without Secure flag`, `Set-Cookie: ${setCookie.substring(0, 120)}`, 'Add the Secure flag so the cookie is only sent over HTTPS.');
-    }
-    if (!setCookie.includes('SameSite')) {
-      const sev = isSensitive ? 'MOYENNE' : 'FAIBLE';
-      addFinding(sev, 'Cookies', `Cookie "${cookieName}" without SameSite flag`, `Set-Cookie: ${setCookie.substring(0, 120)}`, 'Add SameSite=Lax (or Strict for highly sensitive cookies).');
-    }
+  for (const header of getSetCookieHeaders(headers)) {
+    const cookie = classifySetCookie(header, { https: new URL(baseUrl).protocol === 'https:' });
+    if (!cookie) continue;
+    addFinding(
+      cookie.severity,
+      'Cookies',
+      `Cookie "${cookie.name}" has insecure attributes`,
+      `Issues: ${cookie.issues.join('; ')}. Cookie values are intentionally omitted from evidence.`,
+      'Use HttpOnly for sensitive cookies, Secure on HTTPS, an appropriate SameSite value, and valid cookie prefixes.',
+    );
   }
 }
 
 // ──────────── MODULE 5 : Supabase Audit ────────────
 
-async function auditSupabase(jsContents, spinner) {
+async function auditSupabase(jsContents, spinner, provided = null) {
   spinner.text = 'Searching for Supabase configuration...';
 
-  let supabaseUrl = null;
-  let anonKey = null;
+  // Caller-supplied credentials (supabase-deep) take precedence over discovery.
+  // This lets the deep scan test a project by its explicit URL + anon key even
+  // when the target's public bundle does not expose them.
+  let supabaseUrl = provided?.url || null;
+  let anonKey = provided?.key || null;
 
   for (const js of jsContents) {
-    const urlMatch = js.match(/https?:\/\/[a-z0-9\-]+\.supabase\.co/i);
-    if (urlMatch) supabaseUrl = urlMatch[0];
-
-    const keyMatch = js.match(/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/);
-    if (keyMatch) anonKey = keyMatch[0];
+    if (!supabaseUrl) {
+      const urlMatch = js.match(/https?:\/\/[a-z0-9\-]+\.supabase\.co/i);
+      if (urlMatch) supabaseUrl = urlMatch[0];
+    }
+    if (!anonKey) {
+      const keyMatches = js.match(/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g) || [];
+      anonKey = keyMatches.find((key) => classifySupabaseJwt(key) === 'anon') || null;
+    }
   }
 
   if (!supabaseUrl) {
     addFinding('INFO', 'Supabase', 'No Supabase URL detected', 'No Supabase configuration found in client code', '');
-    return;
+    return { tablesTested: 0, inventoryComplete: false, scoreAvailable: false };
   }
 
   addFinding('INFO', 'Supabase', 'Supabase URL found', supabaseUrl, 'The Supabase URL is public by design, but verify that RLS is in place');
 
   if (!anonKey) {
     addFinding('INFO', 'Supabase', 'Anon key not found', 'Cannot test RLS without anon key', '');
-    return;
+    return { tablesTested: 0, inventoryComplete: false, scoreAvailable: false };
   }
 
-  // Test the REST API to list tables
-  spinner.text = 'Testing Supabase access without authentication...';
-  const restUrl = `${supabaseUrl}/rest/v1/`;
+  if (!await authorizeDiscoveredDestination(supabaseUrl)) {
+    addFinding('INFO', 'Supabase', 'Supabase target blocked by network safety policy', `Project host could not pass public network validation: ${supabaseUrl}`, 'Verify that the project resolves only to public addresses.');
+    return { tablesTested: 0, inventoryComplete: false, scoreAvailable: false };
+  }
 
-  const restRes = await safeFetch(restUrl, {
-    headers: {
-      'apikey': anonKey,
-      'Authorization': `Bearer ${anonKey}`,
-    }
-  });
+  if (classifySupabaseJwt(anonKey) === 'service_role') {
+    addFinding('CRITIQUE', 'Supabase', 'Service role key supplied for anon audit', 'A service-role key bypasses RLS, so using it would make every access result invalid.', 'Replace it with the public anon key and rotate the service-role key if it was exposed client-side.');
+    return { tablesTested: 0, inventoryComplete: false, scoreAvailable: false };
+  }
 
-  if (!restRes) return;
+  const headers = {
+    'apikey': anonKey,
+    'Authorization': `Bearer ${anonKey}`,
+  };
+  const clientTables = extractSupabaseTableCandidates(jsContents);
+  const tables = new Set(clientTables);
+  let inventoryComplete = false;
+  let schemaStatus = null;
 
-  // Attempt to access tables via the OpenAPI schema
+  // Prefer the complete OpenAPI inventory, then fall back to tables observed in
+  // the public client when project settings hide the schema document.
   spinner.text = 'Retrieving Supabase table schema...';
   const schemaRes = await safeFetch(`${supabaseUrl}/rest/v1/`, {
     headers: {
-      'apikey': anonKey,
-      'Authorization': `Bearer ${anonKey}`,
+      ...headers,
       'Accept': 'application/openapi+json',
     }
   });
 
+  schemaStatus = schemaRes?.status ?? null;
   if (schemaRes && schemaRes.status === 200) {
     try {
       const schema = await schemaRes.json();
-      const paths = Object.keys(schema.paths || {});
-      const tables = paths.map(p => p.replace('/', '')).filter(t => t.length > 0);
+      const schemaTables = normalizeSupabaseSchemaTables(Object.keys(schema.paths || {}));
+      for (const table of schemaTables) tables.add(table);
+      inventoryComplete = schemaTables.length > 0;
+      if (schemaTables.length > 0) addFinding('INFO', 'Supabase', `${schemaTables.length} table(s) detected in schema`, schemaTables.join(', '), '');
+    } catch {
+      inventoryComplete = false;
+    }
+  }
 
-      if (tables.length > 0) {
-        addFinding('INFO', 'Supabase', `${tables.length} table(s) detected in schema`, tables.join(', '), '');
+  if (!inventoryComplete) {
+    for (const table of COMMON_SENSITIVE_TABLE_CANDIDATES) tables.add(table);
+    addFinding('INFO', 'Supabase RLS', 'Supabase schema inventory unavailable', `OpenAPI inventory returned status ${schemaStatus ?? 'unreachable'}. ${clientTables.length} table candidate(s) were recovered from public client calls and a bounded sensitive-table fallback was added.`, 'Expose OpenAPI only when appropriate, or connect the repository so VICE can compare migrations with observed runtime access.', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/rls/schema-inventory-unavailable' });
+  }
 
-        // Test read access on each table
-        spinner.text = `Testing RLS on ${tables.length} tables...`;
-        for (const table of tables) {
-          const tableRes = await safeFetch(`${supabaseUrl}/rest/v1/${table}?select=*&limit=1`, {
-            headers: {
-              'apikey': anonKey,
-              'Authorization': `Bearer ${anonKey}`,
-            }
-          });
+  const deniedTables = [];
+  const emptyTables = [];
+  let tablesTested = 0;
+  const candidates = [...tables].slice(0, 100);
+  spinner.text = `Testing RLS on ${candidates.length} table candidate(s)...`;
 
-          if (!tableRes) continue;
+  for (const table of candidates) {
+    const tableRes = await safeFetch(`${supabaseUrl}/rest/v1/${encodeURIComponent(table)}?select=*&limit=1`, { headers });
+    if (!tableRes) continue;
 
-          if (tableRes.status === 200) {
-            const data = await tableRes.json();
-            if (Array.isArray(data) && data.length > 0) {
-              addFinding('CRITIQUE', 'Supabase RLS', `Table "${table}" readable without auth`, `Table ${table} returns data with anon key (${data.length} row(s))`, `Enable RLS on table "${table}": ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;`);
-            } else if (Array.isArray(data) && data.length === 0) {
-              addFinding('INFO', 'Supabase RLS', `Table "${table}": access OK but empty`, 'Table returns 200 but no data — RLS may be active or table is empty', `Verify: SELECT relrowsecurity FROM pg_class WHERE relname = '${table}';`);
-            }
-          } else if (tableRes.status === 401 || tableRes.status === 403) {
-            addFinding('INFO', 'Supabase RLS', `Table "${table}": access denied`, 'RLS appears active (401/403)', '');
-          }
-
-          // Test write access
-          const writeRes = await safeFetch(`${supabaseUrl}/rest/v1/${table}`, {
-            method: 'POST',
-            headers: {
-              'apikey': anonKey,
-              'Authorization': `Bearer ${anonKey}`,
-              'Content-Type': 'application/json',
-              'Prefer': 'return=minimal',
-            },
-            body: JSON.stringify({}),
-          });
-
-          if (writeRes && (writeRes.status === 201 || writeRes.status === 200)) {
-            addFinding('CRITIQUE', 'Supabase RLS', `Table "${table}" writable without auth`, `POST on ${table} returns ${writeRes.status}`, `Add a restrictive RLS write policy on "${table}"`);
-          }
-        }
+    if (tableRes.status === 200) {
+      let data;
+      try { data = await tableRes.json(); } catch { data = null; }
+      if (!Array.isArray(data)) continue;
+      tablesTested++;
+      if (data.length > 0) {
+        const exposure = classifySupabaseRead(table, data);
+        if (!exposure) continue;
+        const paths = exposure.paths.length > 0 ? `\nSensitive field paths: ${exposure.paths.join(', ')}` : '';
+        addFinding(exposure.severity, 'Supabase RLS', exposure.title, `Table ${table} returns ${data.length} row(s) with the anon key.${paths}`, `Review SELECT policies and expose only fields intended for public access on "${table}".`, { classification: 'confirmed', confidence: 'high', rule_id: 'vice/rls/anonymous-read' });
+      } else {
+        emptyTables.push(table);
       }
-    } catch {}
+    } else if (tableRes.status === 401 || tableRes.status === 403) {
+      tablesTested++;
+      deniedTables.push(table);
+    }
+  }
+
+  if (deniedTables.length > 0) {
+    addFinding('INFO', 'Supabase RLS', `${deniedTables.length} table(s) deny anon reads`, deniedTables.join(', '), '', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/rls/anonymous-read-denied' });
+  }
+  if (emptyTables.length > 0) {
+    addFinding('INFO', 'Supabase RLS', `${emptyTables.length} readable table(s) returned no rows`, `${emptyTables.join(', ')}\nAn empty response cannot distinguish an empty table from row filtering.`, 'Review these tables in a white-box audit when complete RLS assurance is required.', { classification: 'heuristic', confidence: 'low', rule_id: 'vice/rls/empty-read-inconclusive' });
+  }
+  if (tablesTested === 0) {
+    addFinding('INFO', 'Supabase RLS', 'Supabase table coverage incomplete', 'No table candidate could be confirmed through the anon REST API, so the deep score is unavailable.', 'Connect repository migrations or enable an authorized schema inventory before relying on this deep scan.', { classification: 'heuristic', confidence: 'low', rule_id: 'vice/rls/no-table-coverage' });
   }
 
   // Check auth endpoints
@@ -818,8 +972,18 @@ async function auditSupabase(jsContents, spinner) {
           addFinding('INFO', 'Supabase Auth', 'Active auth providers', providers.join(', '), 'Verify that only necessary providers are enabled');
         }
       }
+      if (settings.disable_signup === false) {
+        addFinding('INFO', 'Supabase Auth', 'Public signup is enabled', 'Supabase Auth settings advertise that new account creation is enabled. No account was created by this audit.', 'Confirm that public signup is intended and protected against automation.', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/auth/public-signup-enabled' });
+      }
     } catch {}
   }
+
+  return {
+    tablesTested,
+    tableCandidates: candidates.length,
+    inventoryComplete,
+    scoreAvailable: tablesTested > 0,
+  };
 }
 
 // ──────────── MODULE 6 : Auth Injection Test ────────────
@@ -852,12 +1016,17 @@ async function auditAuthInjection(jsContents, spinner) {
   }
 
   if (!supabaseUrl) {
-    addFinding('INFO', 'Auth Injection', 'No Supabase URL — test skipped', '', '');
+    addFinding('INFO', 'Auth Injection', 'No Supabase URL - test skipped', '', '');
+    return;
+  }
+
+  if (!await authorizeDiscoveredDestination(supabaseUrl)) {
+    addFinding('INFO', 'Auth Injection', 'Supabase target blocked by network safety policy', supabaseUrl, 'Verify that the project resolves only to public addresses.');
     return;
   }
 
   if (!anonKey) {
-    addFinding('INFO', 'Auth Injection', 'No anon key found — test skipped', '', '');
+    addFinding('INFO', 'Auth Injection', 'No anon key found - test skipped', '', '');
     return;
   }
 
@@ -912,7 +1081,7 @@ async function auditAuthInjection(jsContents, spinner) {
           let extra = '';
           if (hasPassword) {
             sev = 'CRITIQUE';
-            extra = ' — CONTAINS PASSWORD DATA';
+            extra = ' - CONTAINS PASSWORD DATA';
           }
           addFinding(sev, 'Auth Injection', `Table "${tableName}" readable with ${label}${extra}`, `Exposed columns: ${cols}\nData: ${JSON.stringify(data[0])}`, `Enable RLS and restrict visible columns on "${tableName}"`);
         }
@@ -920,10 +1089,16 @@ async function auditAuthInjection(jsContents, spinner) {
     }
   }
 
-  // ── CHECK 3 : Open signup — unrestricted account creation ──
+  addFinding('INFO', 'Auth Injection', 'Active auth mutation probes skipped', 'The audit did not create accounts, inject rows, or attempt password login. Read-only schema and RLS checks remain active.', '', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/auth/non-destructive-mode' });
+  return;
+
+  // ── CHECK 3 : Open signup - unrestricted account creation ──
   spinner.text = 'Testing open signup...';
-  const testEmail = 'test@test.com';
-  const testPassword = '1234';
+  const signupCanary = createSupabaseCanary(supabaseUrl, 'audit');
+  const injectionCanary = createSupabaseCanary(supabaseUrl, 'injection');
+  const testEmail = signupCanary.email;
+  const injectionEmail = injectionCanary.email;
+  const testPassword = signupCanary.password;
 
   const signupRes = await safeFetch(`${supabaseUrl}/auth/v1/signup`, {
     method: 'POST',
@@ -942,14 +1117,16 @@ async function auditAuthInjection(jsContents, spinner) {
     let body;
     try { body = await signupRes.json(); } catch { body = {}; }
 
-    if (status === 200 && body.id) {
-      addFinding('CRITIQUE', 'Auth Injection', 'Open signup — a user was created', `An account was created with ${testEmail} (id: ${body.id})\nResponse: ${JSON.stringify(body)}`, 'Disable public signup if not needed, or add mandatory email verification + captcha. Delete the created test account.');
-    } else if (status === 200 && body.confirmation_sent_at) {
-      addFinding('MOYENNE', 'Auth Injection', 'Open signup with email confirmation', `Signup is possible but requires email confirmation (${testEmail})`, 'Add a captcha to prevent account spam. Verify that confirmation is mandatory.');
-    } else if (status === 422 || status === 400) {
-      addFinding('INFO', 'Auth Injection', 'Signup restricted or validated', `Status ${status}: ${JSON.stringify(body)}`, '');
-    } else if (status === 429) {
-      addFinding('INFO', 'Auth Injection', 'Rate limiting active on signup', 'Server returns 429 — good sign', '');
+    const signal = classifySignupResponse(status, body);
+    if (signal) {
+      addFinding(
+        signal.severity,
+        'Auth Injection',
+        signal.title,
+        `Status ${status}. Canary account: ${testEmail}. Immediate session: ${signal.kind === 'immediate-session' ? 'yes' : 'no'}.`,
+        signal.kind === 'immediate-session' ? 'Confirm that public signup is intended and protected against automation.' : '',
+        { classification: signal.classification, confidence: signal.confidence, rule_id: `vice/auth/signup-${signal.kind}` },
+      );
     }
   }
 
@@ -968,7 +1145,7 @@ async function auditAuthInjection(jsContents, spinner) {
       },
       body: JSON.stringify({
         instance_id: '00000000-0000-0000-0000-000000000000',
-        email: 'test@test.com',
+        email: injectionEmail,
         encrypted_password: '$2a$10$PBPVTGj2mXoLbn4nhBOYhuXGp1E5KFkyrQKCqbcSm0hOxwDmMOsta',
         email_confirmed_at: new Date().toISOString(),
         role: 'authenticated',
@@ -984,7 +1161,7 @@ async function auditAuthInjection(jsContents, spinner) {
       if (status === 201 || status === 200) {
         addFinding('CRITIQUE', 'Auth Injection', `INJECTION INTO auth.users SUCCEEDED with ${label}`, `A user was injected directly into auth.users!\nResponse: ${JSON.stringify(body)}`, 'URGENT: The auth schema is writable. Immediately revoke INSERT grants on auth.users for anon/authenticated roles.');
       } else if (status === 401 || status === 403 || status === 404) {
-        addFinding('INFO', 'Auth Injection', `auth.users injection blocked with ${label}`, `Status ${status} — access denied`, '');
+        addFinding('INFO', 'Auth Injection', `auth.users injection blocked with ${label}`, `Status ${status} - access denied`, '');
       }
     }
   }
@@ -1009,7 +1186,14 @@ async function auditAuthInjection(jsContents, spinner) {
     try { body = await loginRes.json(); } catch { body = {}; }
 
     if (loginRes.status === 200 && body.access_token) {
-      addFinding('CRITIQUE', 'Auth Injection', 'Login with test account SUCCEEDED — full access obtained', `An access_token was obtained: ${body.access_token}\nUser ID: ${body.user?.id}\nEmail: ${body.user?.email}\nRole: ${body.user?.role}`, 'Signup without verification allows creating accounts and obtaining a token immediately. Enable mandatory email verification.');
+      addFinding(
+        'INFO',
+        'Auth Injection',
+        'Canary signup account obtained a normal authenticated session',
+        `User ID: ${body.user?.id || 'unknown'}\nRole: ${body.user?.role || 'authenticated'}`,
+        'Confirm that immediate sessions are intended and protected against automated signup abuse.',
+        { classification: 'confirmed', confidence: 'high', rule_id: 'vice/auth/signup-session' },
+      );
 
       // Test what this token can do
       spinner.text = 'Testing privileges of the injected account...';
@@ -1026,12 +1210,44 @@ async function auditAuthInjection(jsContents, spinner) {
           const schema = await tokenTestRes.json();
           const tables = Object.keys(schema.paths || {}).map(p => p.replace('/', '')).filter(t => t.length > 0);
           if (tables.length > 0) {
-            addFinding('CRITIQUE', 'Auth Injection', 'Injected account has access to tables', `Tables accessible with the stolen token: ${tables.join(', ')}`, 'Check RLS policies for the "authenticated" role — a user who signs up should only see THEIR OWN data.');
+            addFinding(
+              'INFO',
+              'Auth Injection',
+              'Authenticated schema inventory is visible to the canary user',
+              `${tables.length} table path(s) advertised by OpenAPI. This does not prove row access.`,
+              'Review exposed schema metadata if table-name disclosure is not intended.',
+              { classification: 'confirmed', confidence: 'high', rule_id: 'vice/auth/openapi-schema' },
+            );
+
+            for (const table of tables.slice(0, 12)) {
+              const tableRes = await safeFetch(`${supabaseUrl}/rest/v1/${encodeURIComponent(table)}?select=*&limit=5`, {
+                headers: {
+                  'apikey': anonKey,
+                  'Authorization': `Bearer ${body.access_token}`,
+                },
+              });
+              if (!tableRes || tableRes.status !== 200) continue;
+              let rows;
+              try { rows = await tableRes.json(); } catch { rows = null; }
+              const exposure = classifyAuthenticatedSupabaseRead(table, rows, {
+                userId: body.user?.id,
+                email: body.user?.email || testEmail,
+              });
+              if (!exposure) continue;
+              addFinding(
+                exposure.severity,
+                'Auth Injection',
+                exposure.title,
+                `${Array.isArray(rows) ? rows.length : 0} row(s) returned.${exposure.paths?.length ? ` Sensitive paths: ${exposure.paths.join(', ')}` : ''}`,
+                exposure.severity === 'INFO' ? '' : `Review authenticated SELECT policies on "${table}" and enforce row ownership.`,
+                { classification: exposure.classification, confidence: exposure.confidence, rule_id: 'vice/auth/authenticated-table-read' },
+              );
+            }
           }
         } catch {}
       }
     } else if (loginRes.status === 400 && body.msg?.includes('confirm')) {
-      addFinding('MOYENNE', 'Auth Injection', 'Account created but login blocked (email not confirmed)', 'Email confirmation prevents direct login — good sign', '');
+      addFinding('INFO', 'Auth Injection', 'Canary account login blocked pending email confirmation', 'Email confirmation prevents an immediate session.', '');
     }
   }
 
@@ -1066,11 +1282,11 @@ async function auditAuthInjection(jsContents, spinner) {
 const COMMON_PORTS = [
   { port: 21,    name: 'FTP',          risk: 'Unencrypted file transfer' },
   { port: 22,    name: 'SSH',          risk: 'Remote shell access' },
-  { port: 23,    name: 'Telnet',       risk: 'Unencrypted remote access — VERY DANGEROUS' },
-  { port: 25,    name: 'SMTP',         risk: 'Mail server — can be abused for spam' },
+  { port: 23,    name: 'Telnet',       risk: 'Unencrypted remote access - VERY DANGEROUS' },
+  { port: 25,    name: 'SMTP',         risk: 'Mail server - can be abused for spam' },
   { port: 80,    name: 'HTTP',         risk: 'Web server (normal)' },
   { port: 443,   name: 'HTTPS',        risk: 'Secure web server (normal)' },
-  { port: 3000,  name: 'Dev Server',   risk: 'Dev server (Node/Next/Nuxt) — should not be in production' },
+  { port: 3000,  name: 'Dev Server',   risk: 'Dev server (Node/Next/Nuxt) - should not be in production' },
   { port: 3306,  name: 'MySQL',        risk: 'Exposed MySQL database' },
   { port: 4200,  name: 'Angular Dev',  risk: 'Angular dev server' },
   { port: 5432,  name: 'PostgreSQL',   risk: 'Exposed PostgreSQL database' },
@@ -1079,48 +1295,66 @@ const COMMON_PORTS = [
   { port: 8000,  name: 'HTTP Alt',     risk: 'Alternative HTTP server / API' },
   { port: 8080,  name: 'HTTP Proxy',   risk: 'Proxy or admin panel' },
   { port: 8443,  name: 'HTTPS Alt',    risk: 'Alternative HTTPS' },
-  { port: 8888,  name: 'Jupyter',      risk: 'Jupyter Notebook — code/shell access' },
+  { port: 8888,  name: 'Jupyter',      risk: 'Jupyter Notebook - code/shell access' },
   { port: 9000,  name: 'Portainer',    risk: 'Docker Portainer panel' },
-  { port: 9090,  name: 'Prometheus',   risk: 'Monitoring — exposes sensitive metrics' },
-  { port: 9200,  name: 'Elasticsearch', risk: 'Elasticsearch — can expose data' },
+  { port: 9090,  name: 'Prometheus',   risk: 'Monitoring - exposes sensitive metrics' },
+  { port: 9200,  name: 'Elasticsearch', risk: 'Elasticsearch - can expose data' },
   { port: 27017, name: 'MongoDB',      risk: 'MongoDB often has no auth by default' },
 ];
 
 async function scanPort(ip, port, timeout = 3000) {
+  const context = getScanContext();
+  try { context?.scope?.assertAddress(ip, port); } catch { return false; }
+  if (context?.signal?.aborted) return false;
   return new Promise((resolve) => {
     import('net').then(({ default: net }) => {
       const socket = new net.Socket();
+      let settled = false;
+      const done = value => {
+        if (settled) return;
+        settled = true;
+        context?.signal?.removeEventListener('abort', abort);
+        socket.destroy();
+        resolve(value);
+      };
+      const abort = () => done(false);
+      context?.signal?.addEventListener('abort', abort, { once: true });
       socket.setTimeout(timeout);
-      socket.on('connect', () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.on('timeout', () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.on('error', () => {
-        socket.destroy();
-        resolve(false);
-      });
+      socket.on('connect', () => done(true));
+      socket.on('timeout', () => done(false));
+      socket.on('error', () => done(false));
       socket.connect(port, ip);
-    });
+    }).catch(() => resolve(false));
   });
 }
 
 async function grabBanner(ip, port, timeout = 2000) {
+  const context = getScanContext();
+  try { context?.scope?.assertAddress(ip, port); } catch { return ''; }
+  if (context?.signal?.aborted) return '';
   return new Promise((resolve) => {
-    // Hard timeout to never block for more than 2s
-    const hardTimeout = setTimeout(() => { resolve(''); }, timeout + 500);
+    let socket = null;
+    let data = '';
+    let resolved = false;
+    const abort = () => done('');
+    const done = result => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(hardTimeout);
+      context?.signal?.removeEventListener('abort', abort);
+      socket?.destroy();
+      resolve(result);
+    };
+    const hardTimeout = setTimeout(() => done(data.substring(0, 500)), timeout + 500);
+    context?.signal?.addEventListener('abort', abort, { once: true });
     import('net').then(({ default: net }) => {
-      const socket = new net.Socket();
+      socket = new net.Socket();
       socket.setTimeout(timeout);
-      let data = '';
-      let resolved = false;
-      const done = (result) => { if (!resolved) { resolved = true; clearTimeout(hardTimeout); socket.destroy(); resolve(result); } };
       socket.on('connect', () => {
-        if (port === 80 || port === 8080 || port === 8000 || port === 3000) {
+        if ([80, 3000, 4200, 5555, 8000, 8080, 8888, 9000, 9090, 9200].includes(port)) {
           socket.write('HEAD / HTTP/1.0\r\nHost: ' + ip + '\r\n\r\n');
+        } else if (port === 6379) {
+          socket.write('PING\r\n');
         } else if (port === 443 || port === 8443) {
           done('');
           return;
@@ -1134,19 +1368,19 @@ async function grabBanner(ip, port, timeout = 2000) {
       socket.on('error', () => done(''));
       socket.on('close', () => done(data.substring(0, 500)));
       socket.connect(port, ip);
-    });
+    }).catch(() => done(''));
   });
 }
 
 async function auditVps(spinner) {
-  const ips = [...discoveredIps];
+  const ips = [...(getScanContext()?.discoveredIps || discoveredIps)];
   if (ips.length === 0) {
-    addFinding('INFO', 'VPS Audit', 'No IP detected', 'No VPS IP address found in client code — scan skipped', '');
+    addFinding('INFO', 'VPS Audit', 'No IP detected', 'No VPS IP address found in client code - scan skipped', '');
     return;
   }
 
   for (const ip of ips) {
-    spinner.text = `Scanning ${ip} — detecting open ports...`;
+    spinner.text = `Scanning ${ip} - detecting open ports...`;
 
     const openPorts = [];
 
@@ -1165,83 +1399,34 @@ async function auditVps(spinner) {
     }
 
     if (openPorts.length === 0) {
-      addFinding('INFO', 'VPS Audit', `${ip} — no open port detected`, 'All tested ports are closed or filtered', '');
+      addFinding('INFO', 'VPS Audit', `${ip} - no open port detected`, 'All tested ports are closed or filtered', '');
       continue;
     }
 
     // List open ports
     const portList = openPorts.map(p => `${p.port} (${p.name})`).join(', ');
-    addFinding('INFO', 'VPS Audit', `${ip} — ${openPorts.length} open port(s)`, `Ports: ${portList}`, '');
+    addFinding('INFO', 'VPS Audit', `${ip} - ${openPorts.length} open port(s)`, `Ports: ${portList}`, '');
 
     // Analyze each open port
     for (const { port, name, risk } of openPorts) {
-      spinner.text = `${ip}:${port} (${name}) — grabbing banner...`;
+      spinner.text = `${ip}:${port} (${name}) - grabbing banner...`;
       const banner = await grabBanner(ip, port);
 
-      // Critical ports
-      if (port === 23) {
-        addFinding('CRITIQUE', 'VPS Audit', `${ip}:${port} — Telnet open`, `${risk}. Telnet transmits everything in plaintext (passwords included)${banner ? `\nBanner: ${banner}` : ''}`, 'Disable Telnet immediately and use SSH instead');
-      }
-
-      if (port === 21) {
-        addFinding('ELEVEE', 'VPS Audit', `${ip}:${port} — FTP open`, `${risk}. FTP transmits credentials in plaintext${banner ? `\nBanner: ${banner}` : ''}`, 'Use SFTP or SCP instead of FTP');
-      }
-
-      if (port === 22) {
-        let sev = 'INFO';
-        let detail = `SSH open${banner ? `\nBanner: ${banner}` : ''}`;
-        let reco = '';
-
-        if (banner) {
-          // Extract SSH version
-          const versionMatch = banner.match(/SSH-[\d.]+-([^\s\r\n]+)/);
-          if (versionMatch) {
-            detail += `\nVersion: ${versionMatch[1]}`;
-            reco = 'Ensure password login is disabled (PasswordAuthentication no in sshd_config). Use SSH keys only. Change the default port.';
-            sev = 'MOYENNE';
-          }
-        }
-        addFinding(sev, 'VPS Audit', `${ip}:${port} — SSH open`, detail, reco);
-      }
-
-      // Exposed databases
-      if ([3306, 5432, 27017].includes(port)) {
-        addFinding('CRITIQUE', 'VPS Audit', `${ip}:${port} — ${name} accessible from Internet`, `${risk}${banner ? `\nBanner: ${banner}` : ''}`, `Configure ${name} to listen only on 127.0.0.1. Block port ${port} in the firewall (ufw deny ${port})`);
-      }
-
-      // Redis
-      if (port === 6379) {
-        addFinding('CRITIQUE', 'VPS Audit', `${ip}:${port} — Redis accessible from Internet`, `${risk}${banner ? `\nBanner: ${banner}` : ''}`, 'Redis must NEVER be exposed on the Internet. Configure bind 127.0.0.1 in redis.conf and add a password (requirepass)');
-      }
-
-      // Elasticsearch
-      if (port === 9200) {
-        addFinding('CRITIQUE', 'VPS Audit', `${ip}:${port} — Elasticsearch accessible from Internet`, `${risk}${banner ? `\nBanner: ${banner}` : ''}`, 'Configure network.host: 127.0.0.1 in elasticsearch.yml and enable X-Pack security');
-      }
-
-      // Dev servers in production
-      if ([3000, 4200, 5555, 8888].includes(port)) {
-        addFinding('ELEVEE', 'VPS Audit', `${ip}:${port} — ${name} accessible`, `${risk}${banner ? `\nBanner: ${banner}` : ''}`, `Port ${port} (${name}) should not be exposed in production. Close it in the firewall.`);
-      }
-
-      // Admin panels / monitoring
-      if ([9000, 9090].includes(port)) {
-        addFinding('ELEVEE', 'VPS Audit', `${ip}:${port} — ${name} accessible`, `${risk}${banner ? `\nBanner: ${banner}` : ''}`, `Restrict access to ${name} by source IP or VPN only`);
-      }
-
-      // HTTP on non-standard ports (potential panels)
-      if ([8000, 8080, 8443].includes(port)) {
-        addFinding('MOYENNE', 'VPS Audit', `${ip}:${port} — ${name} open`, `${risk}${banner ? `\nBanner: ${banner}` : ''}`, `Check what is running on port ${port}. If it is an admin panel, restrict access.`);
-      }
-
-      // SMTP
-      if (port === 25) {
-        addFinding('MOYENNE', 'VPS Audit', `${ip}:${port} — SMTP open`, `${risk}${banner ? `\nBanner: ${banner}` : ''}`, 'Verify that the SMTP relay is closed (no open relay). Configure SPF/DKIM/DMARC.');
+      const signal = classifyOpenService(port, banner);
+      if (signal) {
+        addFinding(
+          signal.severity,
+          'VPS Audit',
+          `${ip}:${port} - ${signal.title}`,
+          `TCP connection succeeded.${banner ? `\nBanner: ${banner}` : '\nNo protocol banner was confirmed.'}`,
+          signal.recommendation,
+          { classification: signal.classification, confidence: signal.confidence, rule_id: `vice/vps/service-${port}-${signal.state}` },
+        );
       }
     }
 
     // Check reverse DNS
-    spinner.text = `${ip} — checking reverse DNS...`;
+    spinner.text = `${ip} - checking reverse DNS...`;
     try {
       const dns = await import('dns');
       const hostnames = await new Promise((resolve, reject) => {
@@ -1251,22 +1436,22 @@ async function auditVps(spinner) {
         });
       });
       if (hostnames.length > 0) {
-        addFinding('INFO', 'VPS Audit', `${ip} — reverse DNS`, `Hostnames: ${hostnames.join(', ')}`, '');
+        addFinding('INFO', 'VPS Audit', `${ip} - reverse DNS`, `Hostnames: ${hostnames.join(', ')}`, '');
       }
     } catch {}
 
     // Test if the IP responds to HTTP (potential Cloudflare bypass)
-    spinner.text = `${ip} — testing direct HTTP access...`;
+    spinner.text = `${ip} - testing direct HTTP access...`;
     const directHttp = await safeFetch(`http://${ip}`, { headers: { 'Host': ip } });
     if (directHttp && directHttp.status === 200) {
       const server = directHttp.headers.get('server') || '';
-      addFinding('ELEVEE', 'VPS Audit', `${ip} — direct HTTP access possible`, `Server responds to HTTP on the direct IP (Cloudflare/proxy bypass possible)${server ? `\nServer: ${server}` : ''}`, 'Configure the web server to refuse connections that do not come through the domain/proxy');
+      addFinding('ELEVEE', 'VPS Audit', `${ip} - direct HTTP access possible`, `Server responds to HTTP on the direct IP (Cloudflare/proxy bypass possible)${server ? `\nServer: ${server}` : ''}`, 'Configure the web server to refuse connections that do not come through the domain/proxy');
     }
 
     const directHttps = await safeFetch(`https://${ip}`, { headers: { 'Host': ip } });
     if (directHttps) {
       const server = directHttps.headers.get('server') || '';
-      addFinding('ELEVEE', 'VPS Audit', `${ip} — direct HTTPS access possible`, `Server responds to HTTPS on the direct IP${server ? `\nServer: ${server}` : ''}`, 'Configure nginx/Apache to block requests without a valid Host (default_server returning 444)');
+      addFinding('ELEVEE', 'VPS Audit', `${ip} - direct HTTPS access possible`, `Server responds to HTTPS on the direct IP${server ? `\nServer: ${server}` : ''}`, 'Configure nginx/Apache to block requests without a valid Host (default_server returning 444)');
     }
   }
 }
@@ -1281,8 +1466,8 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
   {
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
-      const page = await browser.newPage();
+      browser = await launchBrowser();
+      const page = await createBrowserPage(browser, baseUrl);
 
       // Create a page that embeds the site in an iframe
       const testHtml = `
@@ -1345,8 +1530,8 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
 
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
-      const page = await browser.newPage();
+      browser = await launchBrowser();
+      const page = await createBrowserPage(browser, baseUrl);
 
       let xssFound = false;
 
@@ -1374,7 +1559,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
           // Check if the payload is reflected in the DOM without execution
           const bodyHtml = await page.content();
           if (bodyHtml.includes(payload)) {
-            addFinding('FAIBLE', 'XSS', `XSS payload reflected (not executed) via "${param}"`, `Payload: ${payload}\nThe payload is present in the page HTML but execution was blocked (CSP, encoding, or browser protection).\nThis is informational — the server reflects user input, but the payload did NOT execute.`, 'Escape user output server-side. Never insert unfiltered content into the DOM. The current CSP or encoding appears effective, but defense-in-depth is recommended.');
+            addFinding('FAIBLE', 'XSS', `XSS payload reflected (not executed) via "${param}"`, `Payload: ${payload}\nThe payload is present in the page HTML but execution was blocked (CSP, encoding, or browser protection).\nThis is informational - the server reflects user input, but the payload did NOT execute.`, 'Escape user output server-side. Never insert unfiltered content into the DOM. The current CSP or encoding appears effective, but defense-in-depth is recommended.');
             xssFound = true;
             break;
           }
@@ -1384,7 +1569,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       }
 
       if (!xssFound) {
-        addFinding('INFO', 'XSS', 'No reflected XSS detected', `${xssPayloads.length} payloads tested on ${testParams.length} parameters — no reflection found`, '');
+        addFinding('INFO', 'XSS', 'No reflected XSS detected', `${xssPayloads.length} payloads tested on ${testParams.length} parameters - no reflection found`, '');
       }
 
       await browser.close();
@@ -1394,13 +1579,13 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
     }
   }
 
-  // ── SCENARIO 3 : XSS Stored — form testing ──
+  // ── SCENARIO 3 : XSS Stored - form testing ──
   spinner.text = 'Detecting forms vulnerable to stored XSS...';
   {
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
-      const page = await browser.newPage();
+      browser = await launchBrowser();
+      const page = await createBrowserPage(browser, baseUrl);
       await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 15000 });
 
       // Find all forms
@@ -1423,14 +1608,14 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       if (forms.length === 0) {
         addFinding('INFO', 'XSS Stored', 'No form detected on the page', '', '');
       } else {
-        const vulnerableForms = forms.filter(f => f.hasTextInput);
-        if (vulnerableForms.length > 0) {
-          const formDetails = vulnerableForms.map(f =>
+        const storedInputForms = forms.filter(f => classifyStoredInputSurface(f));
+        if (storedInputForms.length > 0) {
+          const formDetails = storedInputForms.map(f =>
             `Action: ${f.action}, Method: ${f.method}, Fields: ${f.inputs.map(i => `${i.name} (${i.type})`).join(', ')}`
           ).join('\n');
-          addFinding('MOYENNE', 'XSS Stored', `${vulnerableForms.length} form(s) with text input detected`, `${formDetails}\nThese forms could be vulnerable to stored XSS if data is not escaped on display.`, 'Ensure every submitted value is escaped on output (HTML entities). Never use v-html / dangerouslySetInnerHTML with user data.');
+          addFinding('INFO', 'XSS Stored', `${storedInputForms.length} state-changing form(s) accept free text`, `${formDetails}\nForm presence is an input surface, not proof of stored XSS.`, 'Confirm stored XSS with a harmless canary and verify that later rendering is safely escaped.');
         } else {
-          addFinding('INFO', 'XSS Stored', `${forms.length} form(s) detected without free text fields`, '', '');
+          addFinding('INFO', 'XSS Stored', `${forms.length} form(s) detected without a state-changing free-text surface`, '', '');
         }
       }
 
@@ -1450,10 +1635,8 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
     for (const param of redirectParams) {
       const testUrl = `${baseUrl}?${param}=${encodeURIComponent(evilUrl)}`;
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
-        const res = await fetch(testUrl, { signal: controller.signal, redirect: 'manual' });
-        clearTimeout(timeout);
+        const res = await safeFetch(testUrl, { timeoutMs: 8000, redirect: 'manual', cache: 'no-store' });
+        if (!res) continue;
         const location = res.headers.get('location') || '';
 
         // True open redirect: the Location header resolves to a different origin.
@@ -1474,7 +1657,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
     }
 
     if (!redirectFound) {
-      addFinding('INFO', 'Open Redirect', 'No open redirect detected', `${redirectParams.length} parameters tested — no external redirection`, '');
+      addFinding('INFO', 'Open Redirect', 'No open redirect detected', `${redirectParams.length} parameters tested - no external redirection`, '');
     }
   }
 
@@ -1497,14 +1680,19 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       const acao = res.headers.get('access-control-allow-origin');
       const acac = res.headers.get('access-control-allow-credentials');
 
-      if (acao === evilOrigin || acao === '*') {
-        let sev = 'ELEVEE';
-        let detail = `The server responds with Access-Control-Allow-Origin: ${acao} for origin ${evilOrigin}`;
-        if (acac === 'true') {
-          sev = 'CRITIQUE';
-          detail += '\nAccess-Control-Allow-Credentials: true — a malicious site can read authenticated responses from your users (data theft, tokens, etc.)';
-        }
-        addFinding(sev, 'CORS', 'CORS misconfiguration detected', detail, 'Never reflect the origin without validation. Whitelist only your own domains. Do not use Access-Control-Allow-Origin: * with credentials.');
+      const cors = classifyCorsPolicy({
+        requestOrigin: evilOrigin,
+        allowOrigin: acao,
+        allowCredentials: acac,
+      });
+      if (cors) {
+        addFinding(
+          cors.severity,
+          'CORS',
+          cors.title,
+          `${cors.detail}\nAccess-Control-Allow-Origin: ${acao}${acac ? `\nAccess-Control-Allow-Credentials: ${acac}` : ''}`,
+          'Validate reflected origins against an explicit allowlist. Use wildcard CORS only for intentionally public resources.',
+        );
         break;
       }
     }
@@ -1521,10 +1709,8 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       // Check if HTTP is accessible without redirection
       const httpUrl = httpsUrl.replace('https://', 'http://');
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
-        const httpRes = await fetch(httpUrl, { signal: controller.signal, redirect: 'manual' });
-        clearTimeout(timeout);
+        const httpRes = await safeFetch(httpUrl, { timeoutMs: 8000, redirect: 'manual', cache: 'no-store' });
+        if (!httpRes) throw new Error('http_unreachable');
 
         if (httpRes.status >= 200 && httpRes.status < 300) {
           addFinding('ELEVEE', 'SSL/TLS', 'Site accessible over HTTP without redirection', `${httpUrl} responds with status ${httpRes.status} instead of redirecting to HTTPS`, 'Configure a permanent 301 redirect from HTTP to HTTPS in nginx');
@@ -1553,8 +1739,8 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
   {
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
-      const page = await browser.newPage();
+      browser = await launchBrowser();
+      const page = await createBrowserPage(browser, baseUrl);
       await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 15000 });
 
       const cookies = await page.cookies();
@@ -1564,8 +1750,8 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       } else {
         for (const cookie of cookies) {
           const issues = [];
-          if (!cookie.httpOnly) issues.push('no HttpOnly (accessible via document.cookie — stealable by XSS)');
-          if (!cookie.secure) issues.push('no Secure (sent in plain HTTP — interceptable)');
+          if (!cookie.httpOnly) issues.push('no HttpOnly (accessible via document.cookie - stealable by XSS)');
+          if (!cookie.secure) issues.push('no Secure (sent in plain HTTP - interceptable)');
           if (cookie.sameSite === 'None' || !cookie.sameSite) issues.push(`SameSite=${cookie.sameSite || 'not set'} (vulnerable to CSRF)`);
 
           // Sensitive cookies (session, auth, token)
@@ -1573,7 +1759,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
 
           if (issues.length > 0) {
             const sev = isSensitive ? 'CRITIQUE' : 'MOYENNE';
-            addFinding(sev, 'Cookie Security', `Cookie "${cookie.name}" vulnerable${isSensitive ? ' (SENSITIVE COOKIE)' : ''}`, `Domain: ${cookie.domain}\nValue: ${cookie.value}\nIssues: ${issues.join(', ')}${isSensitive ? '\nThis cookie appears to be related to authentication — theft would allow hijacking the user session.' : ''}`, `Add missing flags: ${!cookie.httpOnly ? 'HttpOnly ' : ''}${!cookie.secure ? 'Secure ' : ''}${!cookie.sameSite ? 'SameSite=Strict' : ''}`);
+            addFinding(sev, 'Cookie Security', `Cookie "${cookie.name}" vulnerable${isSensitive ? ' (SENSITIVE COOKIE)' : ''}`, `Domain: ${cookie.domain}\nIssues: ${issues.join(', ')}\nCookie value omitted from evidence.${isSensitive ? '\nThis cookie appears to be related to authentication, so theft could allow session hijacking.' : ''}`, `Add missing flags: ${!cookie.httpOnly ? 'HttpOnly ' : ''}${!cookie.secure ? 'Secure ' : ''}${!cookie.sameSite ? 'SameSite=Strict' : ''}`);
           }
         }
       }
@@ -1600,14 +1786,14 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
         }
       }
       if (!csp) {
-        addFinding('CRITIQUE', 'CSP', 'No Content-Security-Policy', 'Without CSP, any script can execute on the page:\n- Keylogger injection\n- Token/cookie theft via fetch to an external server\n- DOM modification (defacing, fake login forms)\n- Crypto mining in visitors\' browsers', 'Add a strict CSP. Minimal example:\nContent-Security-Policy: default-src \'self\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data:; connect-src \'self\' https://*.supabase.co');
+        addFinding(classifyHardeningSignal('missing-csp').severity, 'CSP', 'No Content-Security-Policy', 'CSP is a defense-in-depth control that limits the impact of an existing injection flaw. Its absence does not prove that script injection is possible.', 'Add a strict CSP. Minimal example:\nContent-Security-Policy: default-src \'self\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data:; connect-src \'self\' https://*.supabase.co');
       } else {
         // Analyze CSP weaknesses
         if (csp.includes('unsafe-inline') && csp.includes('script-src')) {
-          addFinding('ELEVEE', 'CSP', 'CSP with unsafe-inline on script-src', `CSP: ${csp}\nunsafe-inline allows inline script execution — cancels CSP anti-XSS protection`, 'Remove unsafe-inline from script-src. Use nonces or hashes instead.');
+          addFinding('ELEVEE', 'CSP', 'CSP with unsafe-inline on script-src', `CSP: ${csp}\nunsafe-inline allows inline script execution - cancels CSP anti-XSS protection`, 'Remove unsafe-inline from script-src. Use nonces or hashes instead.');
         }
         if (csp.includes('unsafe-eval')) {
-          addFinding('ELEVEE', 'CSP', 'CSP with unsafe-eval', `CSP: ${csp}\nunsafe-eval allows eval() and new Function() — injection vector`, 'Remove unsafe-eval. Refactor code that uses eval().');
+          addFinding('ELEVEE', 'CSP', 'CSP with unsafe-eval', `CSP: ${csp}\nunsafe-eval allows eval() and new Function() - injection vector`, 'Remove unsafe-eval. Refactor code that uses eval().');
         }
         if (csp.includes('*') && !csp.includes('*.supabase')) {
           addFinding('ELEVEE', 'CSP', 'CSP with wildcard (*)', `CSP: ${csp}\nThe wildcard allows loading from any domain`, 'Replace wildcards with specific domains.');
@@ -1638,7 +1824,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       const body = await res.text();
 
       if (body.includes('root:') && body.includes('/bin/')) {
-        addFinding('CRITIQUE', 'Path Traversal', 'Path traversal detected — /etc/passwd read', `URL: ${testUrl}\nThe server returns the contents of system files`, 'Validate and normalize all file paths server-side. Never construct a file path from user input.');
+        addFinding('CRITIQUE', 'Path Traversal', 'Path traversal detected - /etc/passwd read', `URL: ${testUrl}\nThe server returns the contents of system files`, 'Validate and normalize all file paths server-side. Never construct a file path from user input.');
         traversalFound = true;
         break;
       }
@@ -1652,37 +1838,30 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
   // ── SCENARIO 10 : HTTP Method testing ──
   spinner.text = 'Testing dangerous HTTP methods...';
   {
-    // Get a reference GET response for comparison
-    const getRef = await safeFetch(baseUrl);
-    const getBody = getRef ? await getRef.text() : '';
-    const getStatus = getRef ? getRef.status : 0;
-    const getBodyStart = getBody.substring(0, 500);
-
-    const dangerousMethods = ['PUT', 'DELETE', 'TRACE', 'OPTIONS'];
+    const dangerousMethods = ['TRACE', 'OPTIONS'];
 
     for (const method of dangerousMethods) {
-      const res = await safeFetch(baseUrl, { method });
+      const traceCanary = method === 'TRACE' ? 'vice-trace-probe-2026' : '';
+      const res = await safeFetch(baseUrl, {
+        method,
+        ...(traceCanary ? { headers: { 'X-Vice-Trace-Canary': traceCanary } } : {}),
+      });
       if (!res) continue;
 
-      if (method === 'TRACE' && res.status === 200) {
-        const body = await res.text();
-        if (body.includes('TRACE')) {
-          addFinding('ELEVEE', 'HTTP Methods', 'TRACE method enabled', `The server accepts the TRACE method — allows Cross-Site Tracing (XST) to steal HttpOnly cookies`, 'Disable TRACE in the web server configuration');
-        }
+      let methodBody = '';
+      try { methodBody = await res.text(); } catch {}
+      if (method === 'TRACE') {
+        const trace = classifyTraceResponse(res.status, methodBody, traceCanary);
+        if (trace) addFinding(trace.severity, 'HTTP Methods', 'TRACE reflects request data', `The TRACE response reflected the unique audit header on ${baseUrl}.`, 'Disable TRACE in the web server configuration.', { classification: trace.classification, confidence: trace.confidence, rule_id: 'vice/http/trace-reflection' });
+        continue;
       }
-
-      if ((method === 'PUT' || method === 'DELETE') && (res.status === 200 || res.status === 201 || res.status === 204)) {
-        const body = await res.text();
-        const bodyStart = body.substring(0, 500);
-
-        // Check if the response is identical to GET (server ignoring the method)
-        const sameAsGet = res.status === getStatus && Math.abs(body.length - getBody.length) < 100 && bodyStart === getBodyStart;
-        const methodNotAllowed = /method not allowed|not supported|invalid method|405/i.test(body);
-
-        if (sameAsGet || methodNotAllowed) {
-          addFinding('INFO', 'HTTP Methods', `${method} returns same response as GET`, `The server responds to ${method} on ${baseUrl} (status ${res.status}) but the response is identical to GET — the method is likely not actually processed.`, '');
-        } else {
-          addFinding('ELEVEE', 'HTTP Methods', `${method} method accepted`, `The server accepts ${method} on ${baseUrl} (status ${res.status}) and the response differs from GET — the method may be actively processed.`, `Disable ${method} except on API endpoints that require it`);
+      if (method === 'OPTIONS') {
+        const advertised = `${res.headers.get('allow') || ''},${res.headers.get('access-control-allow-methods') || ''}`
+          .split(',')
+          .map(value => value.trim().toUpperCase())
+          .filter(value => ['POST', 'PUT', 'PATCH', 'DELETE'].includes(value));
+        if (advertised.length > 0) {
+          addFinding('INFO', 'HTTP Methods', 'State-changing methods advertised', `OPTIONS advertises: ${[...new Set(advertised)].join(', ')}. The audit did not invoke these methods.`, 'Confirm that every state-changing route requires authorization.', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/http/advertised-mutations' });
         }
       }
     }
@@ -1694,13 +1873,13 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
 async function auditLoginSecurity(baseUrl, spinner) {
   let browser;
   try {
-    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+    browser = await launchBrowser();
   } catch (err) {
     addFinding('INFO', 'Login Audit', 'Unable to launch browser', err.message, '');
     return;
   }
 
-  const page = await browser.newPage();
+  const page = await createBrowserPage(browser, baseUrl);
 
   // ── DETECT : Find the login page ──
   spinner.text = 'Searching for login page...';
@@ -1725,7 +1904,7 @@ async function auditLoginSecurity(baseUrl, spinner) {
   }
 
   if (!loginUrl) {
-    addFinding('INFO', 'Login Audit', 'No login page found', `No login page detected on ${baseUrl}`, '');
+    addFinding('INFO', 'Login Audit', 'No local login form found', `No local credential form was detected on ${baseUrl}. Federated or externally hosted authentication may still be present.`, 'Audit custom or external authentication entry points separately.');
     await browser.close();
     return;
   }
@@ -1775,43 +1954,42 @@ async function auditLoginSecurity(baseUrl, spinner) {
   if (formInfo.method === 'GET') {
     addFinding('CRITIQUE', 'Login Audit', 'Login form uses GET method', `The password is sent in the URL!\nAction: ${formInfo.action}\nMethod: GET\nConsequences:\n- The password appears in the address bar\n- It is saved in browser history\n- It is visible in web server logs\n- It can be captured by proxies and browser extensions`, 'Change the form method to POST. NEVER send passwords via GET.');
   } else {
-    addFinding('INFO', 'Login Audit', 'Form uses POST method', 'The password is not sent in the URL — correct', '');
+    addFinding('INFO', 'Login Audit', 'Form uses POST method', 'The password is not sent in the URL - correct', '');
   }
 
   // ── CHECK 2 : CSRF Token ──
   spinner.text = 'Checking CSRF protection...';
-  if (!formInfo.hasCSRF) {
-    addFinding('ELEVEE', 'Login Audit', 'No CSRF token detected on the login form', `Inputs found: ${formInfo.inputs.map(i => `${i.name} (${i.type})`).join(', ')}\nWithout CSRF, a malicious site can submit the login form on behalf of the user (Cross-Site Request Forgery).`, 'Add a unique CSRF token to each form. Frameworks: Nuxt/Vue use custom headers, verify that the backend validates the origin.');
-  } else {
-    addFinding('INFO', 'Login Audit', 'CSRF token detected', 'The form contains an anti-CSRF token', '');
+  const csrf = classifyCsrfEvidence(formInfo);
+  if (csrf) {
+    addFinding(
+      csrf.severity,
+      'Login Audit',
+      csrf.title,
+      `${csrf.detail}\nInputs found: ${formInfo.inputs.map(i => `${i.name} (${i.type})`).join(', ')}`,
+      csrf.severity === 'FAIBLE' ? 'Verify SameSite cookies and server-side Origin or Referer validation.' : '',
+    );
   }
 
-  // ── CHECK 3 : Autocomplete password ──
-  spinner.text = 'Checking password autocomplete...';
-  const passwordInput = formInfo.inputs.find(i => i.type === 'password');
-  if (passwordInput && passwordInput.autocomplete !== 'off' && passwordInput.autocomplete !== 'new-password') {
-    addFinding('FAIBLE', 'Login Audit', 'Autocomplete enabled on password field', `The field "${passwordInput.name}" does not have autocomplete="off"\nThe browser may save the password — risk on shared workstations`, 'Add autocomplete="off" or autocomplete="current-password" depending on context');
-  }
-
-  // ── CHECK 4 : HTTPS on the form ──
+  // ── CHECK 3 : HTTPS on the form ──
   if (formInfo.action && formInfo.action.startsWith('http://')) {
-    addFinding('CRITIQUE', 'Login Audit', 'Login form submitted over HTTP (not HTTPS)', `Action: ${formInfo.action}\nThe password is sent in cleartext over the network — interceptable by anyone on the same WiFi`, 'Change the form action to HTTPS');
+    addFinding('CRITIQUE', 'Login Audit', 'Login form submitted over HTTP (not HTTPS)', `Action: ${formInfo.action}\nThe password is sent in cleartext over the network - interceptable by anyone on the same WiFi`, 'Change the form action to HTTPS');
   }
 
-  // ── CHECK 5 : Brute force — rate limiting ──
+  addFinding('INFO', 'Login Audit', 'Active login submissions skipped', 'The audit inspected the form without submitting credentials, reset requests, or injection payloads.', '', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/login/non-destructive-mode' });
+  await browser.close();
+  return;
+
+  // ── CHECK 5 : Brute force - rate limiting ──
   spinner.text = 'Testing rate limiting on login (5 attempts)...';
   {
-    const fakeCredentials = [
-      { email: 'brute1@vice-audit.test', password: 'wrong1' },
-      { email: 'brute2@vice-audit.test', password: 'wrong2' },
-      { email: 'brute3@vice-audit.test', password: 'wrong3' },
-      { email: 'brute4@vice-audit.test', password: 'wrong4' },
-      { email: 'brute5@vice-audit.test', password: 'wrong5' },
-    ];
+    const fakeCredentials = Array.from({ length: 5 }, (_, index) => ({
+      email: 'brute-probe@vice-audit.test',
+      password: `wrong-${index + 1}`,
+    }));
 
     let blocked = false;
-    let lastStatus = null;
     const statuses = [];
+    const rateSamples = [];
 
     for (const cred of fakeCredentials) {
       // Reload the page for each attempt
@@ -1853,20 +2031,23 @@ async function auditLoginSecurity(baseUrl, spinner) {
 
       // Check if we were blocked
       const pageContent = await page.content();
-      if (responseStatus === 429 || /rate.?limit|too.?many|trop.?de.?tentatives|bloque|locked|captcha/i.test(pageContent) || /rate.?limit|too.?many/i.test(responseBody)) {
+      const rateSample = { status: responseStatus, body: `${pageContent}\n${responseBody}` };
+      rateSamples.push(rateSample);
+      const rateEvidence = classifyRateLimitEvidence(rateSamples);
+      if (rateEvidence.state === 'enforced') {
         blocked = true;
         statuses.push(`${cred.email}: BLOCKED (${responseStatus || 'captcha/message'})`);
         break;
       }
       statuses.push(`${cred.email}: ${responseStatus || 'submitted'}`);
-      lastStatus = responseStatus;
       page.removeAllListeners('response');
     }
 
+    const rateEvidence = classifyRateLimitEvidence(rateSamples);
     if (!blocked) {
-      addFinding('ELEVEE', 'Login Audit', 'No rate limiting detected on login', `5 failed login attempts without being blocked.\nResults: ${statuses.join(', ')}\nAn attacker can brute-force passwords without restriction.`, 'Implement rate limiting: max 5 attempts per IP/email in 15 min. Add a captcha after 3 failures. Use progressive delay (1s, 2s, 4s...).');
+      addFinding('INFO', 'Login Audit', 'Login rate limiting not confirmed', `5 failed attempts against the same synthetic identity did not trigger a visible block.\nResults: ${statuses.join(', ')}\nThis short probe cannot prove that no higher-threshold, account-aware, IP-based, or upstream limit exists.`, 'Review server-side rate-limit telemetry and test the configured threshold in a controlled environment.', { classification: 'heuristic', confidence: 'low' });
     } else {
-      addFinding('INFO', 'Login Audit', 'Rate limiting active on login', `Blocked after ${statuses.length} attempt(s)\n${statuses.join('\n')}`, '');
+      addFinding('INFO', 'Login Audit', 'Rate limiting active on login', `Blocked after ${rateEvidence.attempt || statuses.length} attempt(s)\n${statuses.join('\n')}`, '');
     }
   }
 
@@ -1945,7 +2126,7 @@ async function auditLoginSecurity(baseUrl, spinner) {
     if (fakeResponse) {
       const isGeneric = /invalid credentials|identifiants incorrects|email ou mot de passe|invalid email or password|email or password/i.test(fakeResponse);
       if (isGeneric) {
-        addFinding('INFO', 'Login Audit', 'Generic error message used', 'The message does not reveal whether the email exists or not — good sign', '');
+        addFinding('INFO', 'Login Audit', 'Generic error message used', 'The message does not reveal whether the email exists or not - good sign', '');
       }
     }
   }
@@ -2006,7 +2187,7 @@ async function auditLoginSecurity(baseUrl, spinner) {
 
     if (eS && pS) {
       // ── PHASE 1 : Injection detection ──
-      spinner.text = 'SQL Injection — Phase 1: Detection...';
+      spinner.text = 'SQL Injection - Phase 1: Detection...';
       let sqlVulnerable = false;
       let dbType = 'unknown';
 
@@ -2040,18 +2221,18 @@ async function auditLoginSecurity(baseUrl, spinner) {
         else if (/(?:unterminated quoted string|unclosed quotation mark|syntax error\s+(?:near|at line|at end of input)|SQL syntax;\s+check the manual|SQLSTATE\[\d+\])/i.test(combined)) { sqlVulnerable = true; }
 
         if (sqlVulnerable) {
-          addFinding('CRITIQUE', 'SQL Injection', `SQL injection confirmed — database: ${dbType}`, `Payload: ${payload} (${name})\nThe server exposes an SQL error. The detected DB type allows crafting specific payloads.`, 'Use prepared statements. Disable error display in production.');
+          addFinding('CRITIQUE', 'SQL Injection', `SQL injection confirmed - database: ${dbType}`, `Payload: ${payload} (${name})\nThe server exposes an SQL error. The detected DB type allows crafting specific payloads.`, 'Use prepared statements. Disable error display in production.');
           break;
         }
       }
 
       if (!sqlVulnerable) {
-        addFinding('INFO', 'SQL Injection', 'No SQL injection detected in phase 1', `${detectionPayloads.length} payloads tested — no SQL error`, '');
+        addFinding('INFO', 'SQL Injection', 'No SQL injection detected in phase 1', `${detectionPayloads.length} payloads tested - no SQL error`, '');
       }
 
       // ── PHASE 2 : Table enumeration (if vulnerable) ──
       if (sqlVulnerable) {
-        spinner.text = 'SQL Injection — Phase 2: Table enumeration (read-only)...';
+        spinner.text = 'SQL Injection - Phase 2: Table enumeration (read-only)...';
 
         // Determine the number of columns with ORDER BY
         let numColumns = 0;
@@ -2103,7 +2284,7 @@ async function auditLoginSecurity(baseUrl, spinner) {
         }
 
         // ── PHASE 3 : Attempt to read users ──
-        spinner.text = 'SQL Injection — Phase 3: Attempting to read users...';
+        spinner.text = 'SQL Injection - Phase 3: Attempting to read users...';
 
         const userReadPayloads = {
           postgresql: [
@@ -2171,7 +2352,7 @@ async function auditLoginSecurity(baseUrl, spinner) {
         }
 
         // ── PHASE 4 : Attempt to read passwords ──
-        spinner.text = 'SQL Injection — Phase 4: Checking password exposure...';
+        spinner.text = 'SQL Injection - Phase 4: Checking password exposure...';
 
         const passColumns = ['password', 'encrypted_password', 'password_hash', 'hash', 'passwd', 'pass', 'pwd'];
         for (const col of passColumns) {
@@ -2197,29 +2378,30 @@ async function auditLoginSecurity(baseUrl, spinner) {
         }
 
         // ── PHASE 5 : Blind SQL injection (timing-based) ──
-        spinner.text = 'SQL Injection — Phase 5: Blind injection test (timing)...';
+        spinner.text = 'SQL Injection - Phase 5: Blind injection test (timing)...';
         {
           const sleepPayloads = {
-            postgresql: "' AND pg_sleep(3)--",
-            mysql: "' AND SLEEP(3)--",
-            sqlite: "' AND 1=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(100000000/2))))--",
-            unknown: "' AND SLEEP(3)--",
+            postgresql: "' AND pg_sleep(2)--",
+            mysql: "' AND SLEEP(2)--",
+            unknown: "' AND SLEEP(2)--",
           };
 
-          const sleepPayload = sleepPayloads[dbType] || sleepPayloads.unknown;
+          const sleepPayload = sleepPayloads[dbType];
+          if (sleepPayload) {
+            const measure = async (payload) => {
+              const startedAt = performance.now();
+              await submitPayload(payload);
+              return performance.now() - startedAt;
+            };
+            const controlSamples = [];
+            const attackSamples = [];
+            for (let i = 0; i < 3; i++) controlSamples.push(await measure('test@test.com'));
+            for (let i = 0; i < 2; i++) attackSamples.push(await measure(sleepPayload));
+            const timing = classifyTimingSamples(controlSamples, attackSamples, 2000);
 
-          // Measure normal time
-          const startNormal = Date.now();
-          await submitPayload("test@test.com");
-          const normalTime = Date.now() - startNormal;
-
-          // Measure time with sleep
-          const startSleep = Date.now();
-          await submitPayload(sleepPayload);
-          const sleepTime = Date.now() - startSleep;
-
-          if (sleepTime > normalTime + 2500) {
-            addFinding('CRITIQUE', 'SQL Injection', 'Blind SQL Injection confirmed (time-based)', `Payload: ${sleepPayload}\nNormal time: ${normalTime}ms\nTime with sleep: ${sleepTime}ms (difference: ${sleepTime - normalTime}ms)\nEven without a visible error, an attacker can extract the entire database character by character via response time.`, 'Blind injection is the most dangerous as it is invisible in application logs. Fix immediately.');
+            if (timing) {
+              addFinding('CRITIQUE', 'SQL Injection', 'Blind SQL Injection confirmed (time-based)', `Payload: ${sleepPayload}\nControl median: ${timing.controlMedian}ms\nPayload median: ${timing.attackMedian}ms\nRepeated difference: ${timing.difference}ms`, 'Use parameterized queries and retest after remediation.');
+            }
           }
         }
       }
@@ -2280,23 +2462,25 @@ async function auditLoginSecurity(baseUrl, spinner) {
 
           const resetResponse = await page.evaluate(() => document.body.innerText);
           if (/not found|n'existe pas|no account|introuvable|unknown/i.test(resetResponse)) {
-            addFinding('ELEVEE', 'Login Audit', 'Enumeration possible via forgot password', `The reset page reveals whether an email is registered or not.\nResponse: "${resetResponse.substring(0, 200)}"`, 'Always respond "If this email is registered, a reset link has been sent" — even if the email does not exist.');
+            addFinding('ELEVEE', 'Login Audit', 'Enumeration possible via forgot password', `The reset page reveals whether an email is registered or not.\nResponse: "${resetResponse.substring(0, 200)}"`, 'Always respond "If this email is registered, a reset link has been sent" - even if the email does not exist.');
           }
         } catch {}
 
         // Test rate limiting on reset
         spinner.text = 'Testing rate limiting on password reset...';
         let resetBlocked = false;
+        const resetRateSamples = [];
         for (let i = 0; i < 5; i++) {
           await page.goto(resetUrl, { waitUntil: 'networkidle2', timeout: 10000 });
           await new Promise(r => setTimeout(r, 1000));
           try {
             await page.click(resetForm.emailSelector).catch(() => {});
-            await page.type(resetForm.emailSelector, `spam${i}@vice-audit.test`, { delay: 20 });
+            await page.type(resetForm.emailSelector, 'reset-probe@vice-audit.test', { delay: 20 });
             await page.keyboard.press('Enter');
             await new Promise(r => setTimeout(r, 1500));
             const content = await page.evaluate(() => document.body.innerText);
-            if (/rate.?limit|too.?many|trop|bloque|locked|captcha|wait/i.test(content)) {
+            resetRateSamples.push({ body: content });
+            if (classifyRateLimitEvidence(resetRateSamples).state === 'enforced') {
               resetBlocked = true;
               break;
             }
@@ -2304,37 +2488,13 @@ async function auditLoginSecurity(baseUrl, spinner) {
         }
 
         if (!resetBlocked) {
-          addFinding('MOYENNE', 'Login Audit', 'No rate limiting on forgot password', '5 reset requests sent without being blocked.\nAn attacker can spam reset emails to harass a user or test emails.', 'Limit to 3 reset requests per email per hour. Add a captcha.');
+          addFinding('INFO', 'Login Audit', 'Password reset rate limiting not confirmed', '5 reset attempts against the same synthetic identity did not trigger a visible block. This short browser probe cannot prove that no server-side or upstream limit exists.', 'Review reset telemetry and verify the configured per-account and per-IP thresholds.', { classification: 'heuristic', confidence: 'low' });
+        } else {
+          const evidence = classifyRateLimitEvidence(resetRateSamples);
+          addFinding('INFO', 'Login Audit', 'Rate limiting active on password reset', `A blocking signal appeared after ${evidence.attempt || resetRateSamples.length} attempt(s).`, '');
         }
       }
     }
-  }
-
-  // ── CHECK 10 : CSP bypass demo — external script injection ──
-  spinner.text = 'Testing protection against external script injection (CSP)...';
-  {
-    const cspTestPage = await browser.newPage();
-    await cspTestPage.goto(loginUrl, { waitUntil: 'networkidle2', timeout: 15000 });
-
-    // Attempt to inject an external script via the console (simulates what an XSS would do)
-    const injectionResult = await cspTestPage.evaluate(async () => {
-      return new Promise((resolve) => {
-        const script = document.createElement('script');
-        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js';
-        script.onload = () => resolve('LOADED');
-        script.onerror = () => resolve('BLOCKED');
-        document.head.appendChild(script);
-        setTimeout(() => resolve('TIMEOUT'), 5000);
-      });
-    });
-
-    if (injectionResult === 'LOADED') {
-      addFinding('CRITIQUE', 'Login Audit', 'External script injection possible — CSP missing or weak', `An external script (cdnjs/lodash) was loaded successfully on the login page.\nWithout CSP, an attacker who finds an XSS injection point can:\n- Load a keylogger that captures email + password\n- Send credentials to their server\n- Redirect to a fake login page (phishing)\n- Steal the session token after login`, 'Add a strict Content-Security-Policy:\nscript-src \'self\'; object-src \'none\'; base-uri \'self\'');
-    } else {
-      addFinding('INFO', 'Login Audit', 'External script injection blocked', `Result: ${injectionResult} — CSP or the browser blocks loading external scripts`, '');
-    }
-
-    await cspTestPage.close();
   }
 
   await browser.close();
@@ -2503,7 +2663,7 @@ async function detectStack(baseUrl, jsContents, spinner) {
       fullStackDetail += `\n[${category}]\n`;
       for (const tech of found) {
         const sources = detected.get(tech);
-        fullStackDetail += `  ${tech} — detected via: ${sources.join(', ')}\n`;
+        fullStackDetail += `  ${tech} - detected via: ${sources.join(', ')}\n`;
       }
     }
   }
@@ -2575,7 +2735,7 @@ async function detectStack(baseUrl, jsContents, spinner) {
 
 async function scanSubdomains(baseUrl, spinner) {
   const domain = new URL(baseUrl).hostname;
-  const baseDomain = domain.split('.').slice(-2).join('.');
+  const baseDomain = getScanContext()?.scope?.discoveryRoot || domain;
 
   const commonSubs = [
     'www', 'api', 'app', 'admin', 'panel', 'dashboard', 'staging', 'stage', 'dev',
@@ -2632,20 +2792,19 @@ async function scanSubdomains(baseUrl, spinner) {
   const { promisify } = await import('util');
   const resolve4 = promisify(dns.default.resolve4);
 
-  const foundSubs = [];
-  let checked = 0;
-  const total = candidates.size;
-
-  for (const subdomain of candidates) {
-    checked++;
-    if (checked % 10 === 0) spinner.text = `Subdomain DNS check [${checked}/${total}] ${subdomain}...`;
+  const candidateList = [...candidates];
+  const total = candidateList.length;
+  const resolvedCandidates = await mapWithConcurrency(candidateList, 20, async (subdomain, index) => {
+    if ((index + 1) % 10 === 0) spinner.text = `Subdomain DNS check [${index + 1}/${total}] ${subdomain}...`;
     try {
       const ips = await resolve4(subdomain);
       if (ips && ips.length > 0) {
-        foundSubs.push({ subdomain, ips });
+        return { subdomain, ips };
       }
     } catch {}
-  }
+    return null;
+  });
+  const foundSubs = resolvedCandidates.filter(Boolean);
 
   if (foundSubs.length === 0) {
     addFinding('INFO', 'Subdomains', 'No subdomain found', `${total} candidate(s) tested (${crtCount} from crt.sh, ${commonSubs.length} common prefixes)`, '');
@@ -2655,13 +2814,15 @@ async function scanSubdomains(baseUrl, spinner) {
   const subList = foundSubs.map(s => `${s.subdomain} → ${s.ips.join(', ')}`).join('\n');
   addFinding('INFO', 'Subdomains', `${foundSubs.length} subdomain(s) found`, subList, '');
 
-  // Test each subdomain
-  for (const { subdomain, ips } of foundSubs) {
-    spinner.text = `Testing ${subdomain}...`;
-
-    // Check if the subdomain responds on HTTP/HTTPS
+  const probedSubdomains = await mapWithConcurrency(foundSubs, 6, async ({ subdomain, ips }, index) => {
+    if ((index + 1) % 5 === 0) spinner.text = `Subdomain HTTP check [${index + 1}/${foundSubs.length}] ${subdomain}...`;
     const httpsRes = await safeFetch(`https://${subdomain}`);
-    const httpRes = await safeFetch(`http://${subdomain}`);
+    const httpRes = httpsRes ? null : await safeFetch(`http://${subdomain}`);
+    return { subdomain, ips, httpsRes, httpRes };
+  });
+
+  // Classify each responsive subdomain in deterministic discovery order.
+  for (const { subdomain, ips, httpsRes, httpRes } of probedSubdomains) {
     const res = httpsRes || httpRes;
     const protocol = httpsRes ? 'https' : 'http';
 
@@ -2686,9 +2847,9 @@ async function scanSubdomains(baseUrl, spinner) {
     // Subdomain without HTTPS - skip subdomains named after non-HTTP protocols
     // (ftp.example.com, smtp.example.com, etc.) where HTTP isn't the primary
     // service. They may respond on 80 by accident but flagging them is noise.
-    const nonHttpProtocolNames = ['ftp', 'sftp', 'smtp', 'imap', 'pop', 'mail', 'mx', 'ssh', 'vpn', 'sip', 'irc', 'ldap', 'ntp', 'dns'];
-    if (!httpsRes && httpRes && !nonHttpProtocolNames.includes(subName)) {
-      addFinding('MOYENNE', 'Subdomains', `${subdomain} accessible only via HTTP`, `No HTTPS on ${subdomain}`, `Enable HTTPS on ${subdomain}`);
+    const httpOnly = classifyHttpOnlySubdomain({ httpStatus: httpRes?.status, httpsReachable: Boolean(httpsRes), subName });
+    if (httpOnly) {
+      addFinding(httpOnly.severity, 'Subdomains', `${subdomain} accessible only via HTTP`, `No HTTPS on ${subdomain}`, `Enable HTTPS on ${subdomain}`, { classification: httpOnly.classification, confidence: httpOnly.confidence });
     }
   }
 }
@@ -2697,7 +2858,7 @@ async function scanSubdomains(baseUrl, spinner) {
 
 async function auditDns(baseUrl, spinner) {
   const domain = new URL(baseUrl).hostname;
-  const baseDomain = domain.split('.').slice(-2).join('.');
+  const baseDomain = getScanContext()?.scope?.discoveryRoot || domain;
 
   const dns = await import('dns');
   const { promisify } = await import('util');
@@ -2716,9 +2877,9 @@ async function auditDns(baseUrl, spinner) {
       if (txt.includes('v=spf1')) {
         spfFound = true;
         if (txt.includes('+all')) {
-          addFinding('CRITIQUE', 'DNS / Email', 'SPF with +all — anyone can send emails on your behalf', `SPF: ${txt}`, 'Change +all to ~all or -all in the SPF record');
+          addFinding('CRITIQUE', 'DNS / Email', 'SPF with +all - anyone can send emails on your behalf', `SPF: ${txt}`, 'Change +all to ~all or -all in the SPF record');
         } else if (txt.includes('?all')) {
-          addFinding('ELEVEE', 'DNS / Email', 'SPF with ?all (neutral) — no protection', `SPF: ${txt}`, 'Change ?all to ~all or -all');
+          addFinding('ELEVEE', 'DNS / Email', 'SPF with ?all (neutral) - no protection', `SPF: ${txt}`, 'Change ?all to ~all or -all');
         } else {
           addFinding('INFO', 'DNS / Email', 'SPF configured', `SPF: ${txt}`, '');
         }
@@ -2732,7 +2893,7 @@ async function auditDns(baseUrl, spinner) {
   } catch {}
 
   if (!spfFound) {
-    addFinding('ELEVEE', 'DNS / Email', 'No SPF record found', `The domain ${baseDomain} has no SPF record.\nAnyone can send emails pretending to be @${baseDomain}`, `Add a TXT record: v=spf1 include:_spf.google.com ~all (adapt to your email provider)`);
+    addFinding('MOYENNE', 'DNS / Email', 'No SPF record found', `The domain ${baseDomain} has no SPF record.\nSpoofed messages using @${baseDomain} are not rejected by an SPF policy.`, `Publish an SPF policy adapted to the actual sending providers, or v=spf1 -all when this domain never sends email.`, { classification: 'confirmed', confidence: 'high' });
   }
 
   // ── DMARC (check _dmarc subdomain) ──
@@ -2745,18 +2906,18 @@ async function auditDns(baseUrl, spinner) {
       if (txt.includes('v=DMARC1')) {
         dmarcFound = true;
         if (txt.includes('p=none')) {
-          addFinding('MOYENNE', 'DNS / Email', 'DMARC in "none" mode — no blocking', `DMARC: ${txt}\nSpoofed emails are reported but not blocked.`, 'Switch to p=quarantine or p=reject after an observation period');
+          addFinding('MOYENNE', 'DNS / Email', 'DMARC in "none" mode - no blocking', `DMARC: ${txt}\nSpoofed emails are reported but not blocked.`, 'Switch to p=quarantine or p=reject after an observation period');
         } else if (txt.includes('p=quarantine')) {
           addFinding('INFO', 'DNS / Email', 'DMARC in "quarantine" mode', `DMARC: ${txt}`, 'Consider switching to p=reject for maximum protection');
         } else if (txt.includes('p=reject')) {
-          addFinding('INFO', 'DNS / Email', 'DMARC in "reject" mode — maximum protection', `DMARC: ${txt}`, '');
+          addFinding('INFO', 'DNS / Email', 'DMARC in "reject" mode - maximum protection', `DMARC: ${txt}`, '');
         }
       }
     }
   } catch {}
 
   if (!dmarcFound) {
-    addFinding('ELEVEE', 'DNS / Email', 'No DMARC record found', `No DMARC on _dmarc.${baseDomain}\nPhishing emails sent from @${baseDomain} will not be blocked.`, `Add a TXT record on _dmarc.${baseDomain}: v=DMARC1; p=quarantine; rua=mailto:dmarc@${baseDomain}`);
+    addFinding('MOYENNE', 'DNS / Email', 'No DMARC record found', `No DMARC policy is published on _dmarc.${baseDomain}.\nReceiving providers have no domain policy for handling spoofed messages.`, `Publish DMARC in monitoring mode first, then move to quarantine or reject after validating legitimate senders.`, { classification: 'confirmed', confidence: 'high' });
   }
 
   // ── DKIM ──
@@ -2769,14 +2930,16 @@ async function auditDns(baseUrl, spinner) {
       const dkimRecords = await resolveTxt(`${selector}._domainkey.${baseDomain}`);
       if (dkimRecords.length > 0) {
         dkimFound = true;
-        addFinding('INFO', 'DNS / Email', `DKIM configured (selector: ${selector})`, `Record found on ${selector}._domainkey.${baseDomain}`, '');
+        const signal = classifyDkimSearch(selector, dkimSelectors);
+        addFinding(signal.severity, 'DNS / Email', signal.title, `${signal.detail} Domain: ${baseDomain}`, '', { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/dns/dkim-present' });
         break;
       }
     } catch {}
   }
 
   if (!dkimFound) {
-    addFinding('MOYENNE', 'DNS / Email', 'No DKIM detected (common selectors)', `Selectors tested: ${dkimSelectors.join(', ')}\nDKIM signs emails to prove they come from your server.`, 'Configure DKIM via your email provider (Google Workspace, OVH, etc.)');
+    const signal = classifyDkimSearch(null, dkimSelectors);
+    addFinding(signal.severity, 'DNS / Email', signal.title, `${signal.detail}\nSelectors tested: ${dkimSelectors.join(', ')}`, 'Check the selector configured by the email provider before concluding DKIM is absent.', { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/dns/dkim-inconclusive' });
   }
 
   // ── MX Records ──
@@ -2911,6 +3074,17 @@ async function enumerateOpenApiEndpoints(specUrl, specBody, baseUrl, spinner) {
   try { spec = JSON.parse(specBody); } catch { return; }
   if (!spec || typeof spec !== 'object' || !spec.paths) return;
 
+  for (const surface of findMassAssignmentSurfaces(spec)) {
+    addFinding(
+      'MOYENNE',
+      'API Audit',
+      `Potential mass assignment surface: ${surface.method} ${surface.path}`,
+      `Writable privileged field(s) declared by OpenAPI: ${surface.fields.join(', ')}. Schema presence does not prove missing server-side authorization.`,
+      'Use explicit input DTOs and server-side allowlists. Never bind authorization, ownership, billing or verification fields directly from request bodies.',
+      { classification: 'heuristic', confidence: 'medium', rule_id: 'vice/api/mass-assignment-schema' },
+    );
+  }
+
   // OpenAPI 3.x has servers[]; Swagger 2.x has host + basePath + schemes
   let apiBase = '';
   if (Array.isArray(spec.servers) && spec.servers[0]?.url) {
@@ -2941,6 +3115,7 @@ async function enumerateOpenApiEndpoints(specUrl, specBody, baseUrl, spinner) {
     spinner.text = `OpenAPI probe [${probed}/${targeted.length}] GET ${pathKey}...`;
 
     const fullUrl = apiBase + pathKey;
+    if (!await authorizeDiscoveredDestination(fullUrl)) continue;
     const res = await safeFetch(fullUrl);
     if (!res || res.status !== 200) continue;
 
@@ -2950,12 +3125,18 @@ async function enumerateOpenApiEndpoints(specUrl, specBody, baseUrl, spinner) {
     try { body = await res.text(); } catch {}
     if (!body || body.length < 10) continue;
 
-    const isSensitive = /admin|internal|debug|user|account|password|secret|token|config|me\b/i.test(pathKey);
-    const sev = isSensitive ? 'CRITIQUE' : 'MOYENNE';
-    addFinding(sev, 'API Audit',
-      `Documented endpoint accessible without auth: GET ${pathKey}`,
-      `URL: ${fullUrl}\nStatus: ${res.status}, content-type: ${ct}\nResponse: ${body.substring(0, 200)}\nFrom OpenAPI/Swagger spec at ${specUrl}`,
-      'Verify authentication is required on this endpoint. If it is intentionally public, document it as such and remove sensitive fields from the response.');
+    let payload;
+    try { payload = JSON.parse(body); } catch { payload = body; }
+    const signal = classifyUnauthenticatedApiResponse(pathKey, payload, res.status);
+    if (!signal) continue;
+    addFinding(
+      signal.severity,
+      'API Audit',
+      `Unauthenticated documented API response: GET ${pathKey}`,
+      `URL: ${fullUrl}\nClassification: ${signal.kind}${signal.paths.length ? `\nSensitive paths: ${signal.paths.join(', ')}` : ''}\nFrom OpenAPI/Swagger spec at ${specUrl}`,
+      signal.severity === 'INFO' ? '' : 'Require authentication or remove sensitive fields when this response is not intentionally public.',
+      { classification: signal.classification, confidence: signal.confidence, rule_id: `vice/api/unauthenticated-${signal.kind}` },
+    );
     exposed++;
   }
 
@@ -2969,32 +3150,25 @@ async function enumerateOpenApiEndpoints(specUrl, specBody, baseUrl, spinner) {
 async function auditApiEndpoints(baseUrl, jsContents, spinner) {
   // Extract API endpoints from JS
   const apiPatterns = /(?:https?:\/\/[^\s"'`]+\/api\/[^\s"'`]*|\/api\/[a-zA-Z0-9\/_\-]+)/g;
-  const apiEndpoints = new Set();
+  const origin = new URL(baseUrl).origin;
+  const commonApis = ['/api', '/api/v1', '/api/v2', '/api/users', '/api/auth', '/api/admin', '/api/config',
+    '/api/health', '/api/status', '/api/debug', '/api/graphql', '/graphql', '/api/docs', '/api/swagger'];
+  const apiEndpoints = new Set(commonApis.map(path => origin + path));
 
+  apiDiscovery:
   for (const js of jsContents) {
-    const matches = js.match(apiPatterns);
-    if (matches) {
-      for (const match of matches) {
-        if (match.length >= 6 && match.length <= 200 && isUsableApiEndpoint(match)) {
-          // Normalize
-          let endpoint = match;
-          if (endpoint.startsWith('/')) {
-            endpoint = new URL(baseUrl).origin + endpoint;
-          }
-          apiEndpoints.add(endpoint);
-        }
+    apiPatterns.lastIndex = 0;
+    for (const result of js.matchAll(apiPatterns)) {
+      const match = result[0];
+      if (match.length >= 6 && match.length <= 200 && isUsableApiEndpoint(match)) {
+        const endpoint = resolveFirstPartyApiEndpoint(baseUrl, match);
+        if (endpoint) boundedAdd(apiEndpoints, endpoint, DISCOVERY_BUDGETS.apiEndpoints);
       }
+      if (apiEndpoints.size >= DISCOVERY_BUDGETS.apiEndpoints) break apiDiscovery;
     }
   }
 
   // Add common endpoints to test
-  const origin = new URL(baseUrl).origin;
-  const commonApis = ['/api', '/api/v1', '/api/v2', '/api/users', '/api/auth', '/api/admin', '/api/config',
-    '/api/health', '/api/status', '/api/debug', '/api/graphql', '/graphql', '/api/docs', '/api/swagger'];
-  for (const path of commonApis) {
-    apiEndpoints.add(origin + path);
-  }
-
   if (apiEndpoints.size === 0) {
     addFinding('INFO', 'API Audit', 'No API endpoint detected', '', '');
     return;
@@ -3004,6 +3178,8 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
   let tested = 0;
 
   for (const endpoint of apiEndpoints) {
+    if (!resolveFirstPartyApiEndpoint(baseUrl, endpoint)) continue;
+    if (!await authorizeDiscoveredDestination(endpoint)) continue;
     tested++;
     if (tested % 5 === 0) spinner.text = `API [${tested}/${apiEndpoints.size}] ${endpoint}...`;
 
@@ -3029,18 +3205,21 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
       try { data = JSON.parse(body); } catch {}
 
       if (data) {
-        const hasUserData = /email|password|token|secret|user|account/i.test(body);
-        if (hasUserData) {
-          addFinding('CRITIQUE', 'API Audit', `API endpoint exposes sensitive data without auth`, `${endpoint} (${status})\nContains: ${body.substring(0, 300)}`, 'Add authentication to this endpoint');
-        } else {
-          addFinding('MOYENNE', 'API Audit', `API endpoint accessible without auth: ${endpoint}`, `Status ${status}, Content-Type: ${contentType}\nResponse: ${body.substring(0, 200)}`, 'Verify if this endpoint should be public');
-        }
+        const exposure = classifyPublicJson(data);
+        const paths = exposure.paths.length > 0 ? `\nSensitive field paths: ${exposure.paths.join(', ')}` : '';
+        addFinding(
+          exposure.severity,
+          'API Audit',
+          `${exposure.title}: ${endpoint}`,
+          `Status ${status}, Content-Type: ${contentType}${paths}`,
+          exposure.kind === 'public-json' ? 'Confirm that this endpoint is intentionally public.' : 'Require authorization and return only fields needed by the caller.',
+        );
       }
     }
 
     // Swagger / OpenAPI exposed - parse the spec and probe each documented endpoint
     if (/swagger|openapi|api-docs/i.test(endpoint) && status === 200) {
-      addFinding('ELEVEE', 'API Audit', `API documentation exposed: ${endpoint}`, `Swagger/OpenAPI documentation is publicly accessible.\nAn attacker can see all endpoints, parameters, and data models.`, 'Protect API documentation with authentication or disable it in production');
+      addFinding(classifyHardeningSignal('public-api-docs').severity, 'API Audit', `API documentation publicly accessible: ${endpoint}`, 'Swagger/OpenAPI documentation is publicly accessible. This can be intentional and is not a vulnerability without sensitive operations or data exposure.', 'Review the documented surface and protect documentation only when the API is private.');
       try { await enumerateOpenApiEndpoints(endpoint, body, baseUrl, spinner); } catch {}
     }
 
@@ -3052,48 +3231,32 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
       }
     }
 
-    // ── Test 2 : Rate limiting ──
-    if (/auth|login|signup|register|token|password|reset/i.test(endpoint)) {
-      let rateLimited = false;
-      for (let i = 0; i < 5; i++) {
-        const r = await safeFetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        if (r && r.status === 429) { rateLimited = true; break; }
+    // ── Test 2 : Advertised methods without invoking them ──
+    const optionsRes = await safeFetch(endpoint, { method: 'OPTIONS' });
+    if (optionsRes) {
+      const advertised = `${optionsRes.headers.get('allow') || ''},${optionsRes.headers.get('access-control-allow-methods') || ''}`
+        .split(',')
+        .map(value => value.trim().toUpperCase())
+        .filter(value => ['POST', 'PUT', 'PATCH', 'DELETE'].includes(value));
+      if (advertised.length > 0) {
+        addFinding('INFO', 'API Audit', `State-changing methods advertised: ${endpoint}`, `OPTIONS advertises: ${[...new Set(advertised)].join(', ')}. The audit did not invoke these methods.`, 'Confirm that each state-changing method requires authorization.', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/api/advertised-mutations' });
       }
-      if (!rateLimited) {
-        addFinding('MOYENNE', 'API Audit', `No rate limiting on ${endpoint}`, `5 POST requests sent without being blocked`, 'Add rate limiting on sensitive endpoints');
-      }
-    }
-
-    // ── Test 3 : HTTP Methods ──
-    const methodsAccepted = [];
-    for (const method of ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']) {
-      const r = await safeFetch(endpoint, { method });
-      if (r && r.status < 405 && r.status !== 404) {
-        methodsAccepted.push(`${method}(${r.status})`);
-      }
-    }
-    if (methodsAccepted.length > 2 && /PUT|DELETE|PATCH/.test(methodsAccepted.join(','))) {
-      addFinding('MOYENNE', 'API Audit', `Endpoint ${endpoint} accepts dangerous methods`, `Methods: ${methodsAccepted.join(', ')}`, 'Restrict HTTP methods to only those needed');
     }
 
     // ── Test 4 : Parameter injection (only against same-origin endpoints) ──
     // We never pen-test third-party APIs (Google Maps, Stripe, etc.) - their
     // documentation pages contain words like "query" that would false-positive.
-    let endpointOrigin;
-    try { endpointOrigin = new URL(endpoint).origin; } catch { endpointOrigin = null; }
-    if (endpointOrigin && endpointOrigin === new URL(baseUrl).origin) {
-      const sqlRes = await safeFetch(`${endpoint}?id=' OR '1'='1&q=' UNION SELECT 1--`, {
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (sqlRes) {
-        let sqlBody = '';
-        try { sqlBody = await sqlRes.text(); } catch {}
-        // Use specific SQL error signatures rather than the bare word "sql" or
-        // "query" (which match any documentation page or generic error text).
-        const sqlErrorRegex = /(?:You have an error in your SQL syntax|Warning:\s+mysqli?_|near\s+'[^']*'\s+at line\s+\d+|Unknown column\s+'[^']+'|MySQLSyntaxErrorException|pq:\s+ERROR|ERROR:.*?at character\s+\d+|LINE\s+\d+:\s|unterminated quoted string at or near|relation\s+"[^"]+"\s+does not exist|column\s+"[^"]+"\s+does not exist|syntax error at or near\s+"|sqlite3?\.OperationalError|near\s+"[^"]+":\s+syntax error|unrecognized token:|no such table:|no such column:|ORA-\d{5}|microsoft (?:sql|ole db|odbc)|sqlclient|system\.data\.sqlclient|SQLSTATE\[\d+\])/i;
-        if (sqlErrorRegex.test(sqlBody)) {
-          addFinding('CRITIQUE', 'API Audit', `Possible SQL injection on ${endpoint}`, `The server returns a SQL error when payloads are injected into parameters`, 'Use prepared queries on all API endpoints');
-        }
+    const sqlRes = await safeFetch(`${endpoint}?id=' OR '1'='1&q=' UNION SELECT 1--`, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (sqlRes) {
+      let sqlBody = '';
+      try { sqlBody = await sqlRes.text(); } catch {}
+      // Use specific SQL error signatures rather than the bare word "sql" or
+      // "query" (which match any documentation page or generic error text).
+      const sqlErrorRegex = /(?:You have an error in your SQL syntax|Warning:\s+mysqli?_|near\s+'[^']*'\s+at line\s+\d+|Unknown column\s+'[^']+'|MySQLSyntaxErrorException|pq:\s+ERROR|ERROR:.*?at character\s+\d+|LINE\s+\d+:\s|unterminated quoted string at or near|relation\s+"[^"]+"\s+does not exist|column\s+"[^"]+"\s+does not exist|syntax error at or near\s+"|sqlite3?\.OperationalError|near\s+"[^"]+":\s+syntax error|unrecognized token:|no such table:|no such column:|ORA-\d{5}|microsoft (?:sql|ole db|odbc)|sqlclient|system\.data\.sqlclient|SQLSTATE\[\d+\])/i;
+      if (sqlErrorRegex.test(sqlBody)) {
+        addFinding('CRITIQUE', 'API Audit', `Possible SQL injection on ${endpoint}`, 'The server returns a SQL error when payloads are injected into parameters', 'Use prepared queries on all API endpoints');
       }
     }
 
@@ -3102,8 +3265,9 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
     if (corsRes) {
       const acao = corsRes.headers.get('access-control-allow-origin');
       const acac = corsRes.headers.get('access-control-allow-credentials');
-      if ((acao === '*' || acao === 'https://evil.com') && acac === 'true') {
-        addFinding('CRITIQUE', 'API Audit', `Dangerous CORS on ${endpoint}`, `Access-Control-Allow-Origin: ${acao}\nAccess-Control-Allow-Credentials: true\nA malicious site can call this endpoint with the user's cookies.`, 'Do not reflect arbitrary origins. Whitelist only your domains.');
+      const cors = classifyCorsPolicy({ requestOrigin: 'https://evil.com', allowOrigin: acao, allowCredentials: acac });
+      if (cors) {
+        addFinding(cors.severity, 'API Audit', `${cors.title}: ${endpoint}`, `${cors.detail}\nAccess-Control-Allow-Origin: ${acao}${acac ? `\nAccess-Control-Allow-Credentials: ${acac}` : ''}`, 'Validate reflected origins against an explicit allowlist. Use wildcard CORS only for intentionally public resources.');
       }
     }
   }
@@ -3131,23 +3295,27 @@ async function auditStorage(jsContents, spinner) {
     /https?:\/\/res\.cloudinary\.com\/[a-z0-9\-]+\/[^\s"'`<>)}\]]+/gi,
   ];
 
+  const commonBuckets = ['avatars', 'uploads', 'images', 'files', 'documents', 'media', 'public', 'private', 'assets', 'attachments', 'photos', 'videos', 'invoices', 'exports', 'backups', 'temp'];
   const storageUrls = new Set();
-  const bucketNames = new Set();
+  const bucketNames = new Set(commonBuckets);
 
+  let storageMatchesInspected = 0;
+  storageDiscovery:
   for (const js of jsContents) {
     for (const pattern of storagePatterns) {
-      const matches = js.match(pattern);
-      if (matches) {
-        for (const match of matches) {
-          storageUrls.add(match);
+      pattern.lastIndex = 0;
+      for (const result of js.matchAll(pattern)) {
+          const match = result[0];
+          storageMatchesInspected++;
+          boundedAdd(storageUrls, match, DISCOVERY_BUDGETS.storageUrls);
           // Extract the bucket name
           const bucketMatch = match.match(/\/object\/(?:public|sign)\/([a-zA-Z0-9_\-]+)/);
-          if (bucketMatch) bucketNames.add(bucketMatch[1]);
+          if (bucketMatch) boundedAdd(bucketNames, bucketMatch[1], DISCOVERY_BUDGETS.bucketNames);
           const s3Match = match.match(/([a-z0-9\-]+)\.s3[.\-]/);
-          if (s3Match) bucketNames.add(s3Match[1]);
+          if (s3Match) boundedAdd(bucketNames, s3Match[1], DISCOVERY_BUDGETS.bucketNames);
           const gcsMatch = match.match(/storage\.googleapis\.com\/([a-z0-9\-]+)/);
-          if (gcsMatch) bucketNames.add(gcsMatch[1]);
-        }
+          if (gcsMatch) boundedAdd(bucketNames, gcsMatch[1], DISCOVERY_BUDGETS.bucketNames);
+          if (storageMatchesInspected >= 200) break storageDiscovery;
       }
     }
   }
@@ -3183,6 +3351,13 @@ async function auditStorage(jsContents, spinner) {
 
   // Test Supabase buckets
   if (supabaseUrl && anonKey) {
+    if (!await authorizeDiscoveredDestination(supabaseUrl)) {
+      addFinding('INFO', 'Storage', 'Supabase Storage target blocked by network safety policy', supabaseUrl, 'Verify that the project resolves only to public addresses.');
+      supabaseUrl = null;
+    }
+  }
+
+  if (supabaseUrl && anonKey) {
     spinner.text = 'Enumerating Supabase Storage buckets...';
 
     // List buckets via the API
@@ -3196,8 +3371,8 @@ async function auditStorage(jsContents, spinner) {
         if (Array.isArray(buckets) && buckets.length > 0) {
           for (const bucket of buckets) {
             const name = bucket.name || bucket.id;
-            bucketNames.add(name);
-            if (bucket.public) {
+            const retained = boundedAdd(bucketNames, name, DISCOVERY_BUDGETS.bucketNames);
+            if (retained && bucket.public) {
               knownPublicBuckets.add(name);
               addFinding('INFO', 'Storage', `Bucket Supabase public: ${name}`, `Bucket "${name}" is marked as public`, 'Verify that this bucket only contains files intended to be public');
             }
@@ -3207,15 +3382,13 @@ async function auditStorage(jsContents, spinner) {
     }
 
     // Test each known bucket
-    const commonBuckets = ['avatars', 'uploads', 'images', 'files', 'documents', 'media', 'public', 'private', 'assets', 'attachments', 'photos', 'videos', 'invoices', 'exports', 'backups', 'temp'];
-    for (const name of commonBuckets) bucketNames.add(name);
-
     spinner.text = `Testing ${bucketNames.size} Supabase buckets...`;
 
     for (const bucket of bucketNames) {
       // Test public access to the bucket (list files)
       const listRes = await safeFetch(`${supabaseUrl}/storage/v1/object/list/${bucket}`, {
         method: 'POST',
+        readOnly: 'storage-list',
         headers: {
           'apikey': anonKey,
           'Authorization': `Bearer ${anonKey}`,
@@ -3258,32 +3431,13 @@ async function auditStorage(jsContents, spinner) {
         }
       }
 
-      // Test unauthorized upload
-      const uploadRes = await safeFetch(`${supabaseUrl}/storage/v1/object/${bucket}/vice-test-upload.txt`, {
-        method: 'POST',
-        headers: {
-          'apikey': anonKey,
-          'Authorization': `Bearer ${anonKey}`,
-          'Content-Type': 'text/plain',
-        },
-        body: 'vice-audit-test',
-      });
-
-      if (uploadRes && (uploadRes.status === 200 || uploadRes.status === 201)) {
-        addFinding('CRITIQUE', 'Storage', `Upload possible without auth on bucket "${bucket}"`, `A file was uploaded to "${bucket}" with the anon key.\nAn attacker can store malicious files on your server.`, `Restrict uploads on "${bucket}" to authenticated users via RLS policies on storage.objects`);
-
-        // Clean up the test file
-        await safeFetch(`${supabaseUrl}/storage/v1/object/${bucket}/vice-test-upload.txt`, {
-          method: 'DELETE',
-          headers: { 'apikey': anonKey, 'Authorization': `Bearer ${anonKey}` },
-        });
-      }
     }
   }
 
   // Test found S3 URLs
   for (const url of storageUrls) {
     if (url.includes('s3') && url.includes('amazonaws.com')) {
+      if (!await authorizeDiscoveredDestination(url)) continue;
       spinner.text = `Testing S3 bucket: ${url.substring(0, 60)}...`;
       const res = await safeFetch(url);
       if (res && res.status === 200) {
@@ -3306,7 +3460,9 @@ async function auditWebsockets(baseUrl, jsContents, spinner) {
   const wsOrigin = origin.replace('https://', 'wss://').replace('http://', 'ws://');
 
   // Search for WebSocket URLs in JS
-  const wsUrls = new Set();
+  const commonWsPaths = ['/ws', '/wss', '/websocket', '/socket.io/?EIO=4&transport=websocket', '/realtime', '/cable', '/hub', '/live', '/events'];
+  const commonWsUrls = new Set(commonWsPaths.map(path => wsOrigin + path));
+  const wsUrls = new Set(commonWsUrls);
   const wsPatterns = [
     /wss?:\/\/[^\s"'`<>)}\]]+/gi,
     /\/realtime\/v1/g,
@@ -3317,17 +3473,18 @@ async function auditWebsockets(baseUrl, jsContents, spinner) {
     /\/hub/g,
   ];
 
+  wsDiscovery:
   for (const js of jsContents) {
     for (const pattern of wsPatterns) {
-      const matches = js.match(pattern);
-      if (matches) {
-        for (const match of matches) {
+      pattern.lastIndex = 0;
+      for (const result of js.matchAll(pattern)) {
+          const match = result[0];
           if (match.startsWith('ws')) {
-            wsUrls.add(match);
+            boundedAdd(wsUrls, match, DISCOVERY_BUDGETS.websocketUrls);
           } else {
-            wsUrls.add(wsOrigin + match);
+            boundedAdd(wsUrls, wsOrigin + match, DISCOVERY_BUDGETS.websocketUrls);
           }
-        }
+          if (wsUrls.size >= DISCOVERY_BUDGETS.websocketUrls) break wsDiscovery;
       }
     }
   }
@@ -3348,13 +3505,7 @@ async function auditWebsockets(baseUrl, jsContents, spinner) {
   }
 
   if (supabaseUrl) {
-    wsUrls.add(`${supabaseUrl.replace('https://', 'wss://').replace('http://', 'ws://')}/realtime/v1/websocket?apikey=${anonKey}&vsn=1.0.0`);
-  }
-
-  // Common WebSocket endpoints to test
-  const commonWsPaths = ['/ws', '/wss', '/websocket', '/socket.io/?EIO=4&transport=websocket', '/realtime', '/cable', '/hub', '/live', '/events'];
-  for (const path of commonWsPaths) {
-    wsUrls.add(wsOrigin + path);
+    boundedAdd(wsUrls, `${supabaseUrl.replace('https://', 'wss://').replace('http://', 'ws://')}/realtime/v1/websocket?apikey=${anonKey}&vsn=1.0.0`, DISCOVERY_BUDGETS.websocketUrls);
   }
 
   if (wsUrls.size === 0) {
@@ -3362,20 +3513,28 @@ async function auditWebsockets(baseUrl, jsContents, spinner) {
     return;
   }
 
-  spinner.text = `Testing ${wsUrls.size} WebSocket endpoints...`;
+  const prioritizedWsUrls = [...wsUrls].sort((left, right) => Number(commonWsUrls.has(left)) - Number(commonWsUrls.has(right)));
+  const activeWsUrls = prioritizedWsUrls.slice(0, DISCOVERY_BUDGETS.websocketActive);
+  spinner.text = `Testing ${activeWsUrls.length} of ${wsUrls.size} WebSocket endpoints...`;
+  if (wsUrls.size > activeWsUrls.length) {
+    addFinding('INFO', 'WebSocket', 'WebSocket active probe budget applied', `${wsUrls.size} candidate endpoint(s) found; ${activeWsUrls.length} prioritized endpoints will be actively tested. Discovered URLs are prioritized over generic fallback paths.`, '', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/websocket/probe-budget' });
+  }
 
   // Test each WebSocket with Puppeteer
   let browser;
   try {
-    browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+    browser = await launchBrowser();
   } catch {
     return;
   }
 
-  for (const wsUrl of wsUrls) {
+  try {
+    await mapWithConcurrency(activeWsUrls, 3, async (wsUrl) => {
     spinner.text = `WebSocket: ${wsUrl.substring(0, 60)}...`;
 
-    const page = await browser.newPage();
+    if (!await authorizeDiscoveredDestination(wsUrl)) return;
+
+    const page = await createBrowserPage(browser, baseUrl);
     try {
       const result = await page.evaluate(async (url) => {
         return new Promise((resolve) => {
@@ -3433,36 +3592,31 @@ async function auditWebsockets(baseUrl, jsContents, spinner) {
       }, wsUrl);
 
       if (result.status === 'open' && result.messages && result.messages.length > 0) {
-        const msgPreview = result.messages.slice(0, 3).join('\n');
+        const signal = classifyWebSocketMessages(result.messages);
+        const displayUrl = redactWebSocketUrl(wsUrl);
+        const sensitivePaths = signal.paths.length > 0 ? ` Sensitive paths: ${signal.paths.join(', ')}.` : '';
+        const metadata = { classification: signal.classification, confidence: signal.confidence, rule_id: `vice/websocket/${signal.state}` };
 
-        // Detect actual user data, not protocol-level words.
-        // Real leaks contain emails, JWTs, hashes, or quoted user-data fields.
-        const sensitiveDataPatterns = [
-          /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/,                  // email addresses
-          /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/,                       // JWT shape
-          /\$2[aby]?\$\d{2}\$[./A-Za-z0-9]{53}/,                             // bcrypt
-          /\$argon2[id]{1,2}\$[^"\s]+/,                                       // argon2
-          /"(?:email|password|password_hash|encrypted_password|phone|ssn|first_name|last_name|address|credit_card|card_number)"\s*:\s*"[^"]+"/i,
-        ];
-        const looksLikeProtocolHandshake = /"event"\s*:\s*"phx_(?:reply|join|close)"|"event"\s*:\s*"system"|"event"\s*:\s*"presence_/.test(msgPreview);
-        const hasSensitiveData = sensitiveDataPatterns.some(p => p.test(msgPreview));
-
-        if (hasSensitiveData) {
-          addFinding('ELEVEE', 'WebSocket', `WebSocket exposes data without auth: ${wsUrl}`, `${result.messages.length} message(s) received without authentication:\n${msgPreview}`, 'Add authentication to the WebSocket connection. Check RLS policies on Supabase Realtime channels.');
-        } else if (looksLikeProtocolHandshake) {
-          addFinding('INFO', 'WebSocket', `WebSocket accepts anonymous connection: ${wsUrl}`, `${result.messages.length} protocol-level message(s) received (handshake/system messages, no actual user data).\nFirst messages:\n${msgPreview}`, 'Anonymous WebSocket connection is intentional for some realtime services (e.g., Supabase Realtime with RLS). Verify subscriptions are guarded by RLS policies.');
+        if (signal.state === 'credentials' || signal.state === 'personal-data') {
+          addFinding(signal.severity, 'WebSocket', `Anonymous WebSocket exposes ${signal.state}: ${displayUrl}`, `${result.messages.length} message(s) were received by a null-Origin, unauthenticated browser context.${sensitivePaths} Message contents are omitted from the report.`, 'Require channel authorization and verify row-level or topic-level policies before delivering sensitive data.', metadata);
+        } else if (signal.state === 'auth-rejected') {
+          addFinding('INFO', 'WebSocket', `WebSocket authorization rejection observed: ${displayUrl}`, 'The null-Origin, unauthenticated probe received an explicit authentication or authorization denial.', '', metadata);
+        } else if (signal.state === 'protocol-only') {
+          addFinding('INFO', 'WebSocket', `Anonymous WebSocket protocol handshake: ${displayUrl}`, `${result.messages.length} protocol-level message(s) were received, with no sensitive application fields confirmed.`, 'Verify topic-level authorization for non-public subscriptions.', metadata);
         } else {
-          addFinding('MOYENNE', 'WebSocket', `WebSocket accessible without auth: ${wsUrl}`, `${result.messages.length} message(s) received:\n${msgPreview}`, 'Verify that this WebSocket does not transmit sensitive data without authentication.');
+          addFinding('INFO', 'WebSocket', `Anonymous WebSocket messages require review: ${displayUrl}`, `${result.messages.length} message(s) were received but no credential or exact personal-data field was confirmed. Contents are omitted from the report.`, 'Review whether anonymous delivery is intentional and enforce per-topic authorization.', metadata);
         }
       } else if (result.status === 'open' || result.status === 'no_messages') {
-        addFinding('INFO', 'WebSocket', `WebSocket connected but no messages: ${wsUrl}`, 'Connection is accepted but no messages received', '');
+        const displayUrl = redactWebSocketUrl(wsUrl);
+        addFinding('INFO', 'WebSocket', `WebSocket connected without messages: ${displayUrl}`, 'A null-Origin, unauthenticated browser connection was accepted, but no application data was received.', '', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/websocket/no-messages' });
       }
     } catch {} finally {
       await page.close();
     }
+    });
+  } finally {
+    await browser.close();
   }
-
-  await browser.close();
 }
 
 // ──────────── MODULE 16 : TLS Deeper Analysis ────────────
@@ -3476,23 +3630,44 @@ async function auditTls(baseUrl, spinner) {
 
   const host = url.hostname;
   const port = parseInt(url.port || '443');
+  const connectHost = getScanContext()?.scope?.getPinnedAddresses(host)?.[0] || host;
   const tls = await import('tls');
 
   // Connect to gather certificate + negotiated protocol/cipher
   spinner.text = `TLS: connecting to ${host}:${port}...`;
   const certInfo = await new Promise((resolve) => {
+    const signal = getScanContext()?.signal;
     let resolved = false;
-    const done = (val) => { if (!resolved) { resolved = true; resolve(val); } };
+    let socket = null;
+    const abort = () => { socket?.destroy(); done(null); };
+    const done = (val) => {
+      if (!resolved) {
+        resolved = true;
+        signal?.removeEventListener('abort', abort);
+        resolve(val);
+      }
+    };
+    signal?.addEventListener('abort', abort, { once: true });
     try {
-      const socket = tls.default.connect({
-        host, port, servername: host, timeout: 6000,
+      socket = tls.default.connect({
+        host: connectHost, port, servername: host, timeout: 6000,
         rejectUnauthorized: false,
       }, () => {
         const cert = socket.getPeerCertificate(true);
         const protocol = socket.getProtocol();
         const cipher = socket.getCipher();
+        const x509 = typeof socket.getPeerX509Certificate === 'function' ? socket.getPeerX509Certificate() : null;
+        const publicKey = x509?.publicKey;
         socket.end();
-        done({ cert, protocol, cipher });
+        done({
+          cert,
+          protocol,
+          cipher,
+          authorized: socket.authorized,
+          authorizationError: socket.authorizationError || null,
+          keyType: publicKey?.asymmetricKeyType || null,
+          keyDetails: publicKey?.asymmetricKeyDetails || null,
+        });
       });
       socket.on('error', () => done(null));
       socket.on('timeout', () => { socket.destroy(); done(null); });
@@ -3507,6 +3682,15 @@ async function auditTls(baseUrl, spinner) {
   }
 
   const cert = certInfo.cert;
+  const authorization = classifyTlsAuthorization(certInfo.authorized, certInfo.authorizationError);
+  if (authorization) {
+    addFinding(authorization.severity, 'TLS', authorization.title, `Validation error: ${authorization.error}\nHost: ${host}`, 'Install a certificate whose chain is trusted and whose SAN entries include the scanned hostname.');
+  }
+
+  const keyIssue = classifyTlsPublicKey(certInfo.keyType, certInfo.keyDetails || {});
+  if (keyIssue) {
+    addFinding(keyIssue.severity, 'TLS', keyIssue.title, `Key type: ${certInfo.keyType}\nDetails: ${JSON.stringify(certInfo.keyDetails)}`, 'Use RSA 2048 bits or stronger, or a modern EC key with at least 256-bit security parameters.');
+  }
 
   // Issuer / self-signed (computed before expiration check so we can adjust
   // severity based on the CA - Let's Encrypt certs are 90 days with standard
@@ -3536,7 +3720,7 @@ async function auditTls(baseUrl, spinner) {
   }
   const subjectCN = (cert.subject && cert.subject.CN) || 'unknown';
   addFinding('INFO', 'TLS', `Certificate issued by ${issuerCN}`, `Subject: ${subjectCN}\nSerial: ${cert.serialNumber || 'unknown'}`, '');
-  if (cert.issuer && cert.subject && cert.issuer.CN === cert.subject.CN && cert.issuer.O === cert.subject.O) {
+  if (!authorization && cert.issuer && cert.subject && cert.issuer.CN === cert.subject.CN && cert.issuer.O === cert.subject.O) {
     addFinding('ELEVEE', 'TLS', 'Self-signed certificate', `Issuer and subject match (${cert.issuer.CN}). Browsers will warn users.`, 'Switch to a CA-signed cert (Let\'s Encrypt is free)');
   }
 
@@ -3588,6 +3772,7 @@ async function testGraphQLEndpoint(endpoint, spinner) {
   const introspectionQuery = '{ __schema { queryType { name } mutationType { name } types { name } } }';
   const introRes = await safeFetch(endpoint, {
     method: 'POST',
+    readOnly: 'graphql-query',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query: introspectionQuery }),
   });
@@ -3607,16 +3792,18 @@ async function testGraphQLEndpoint(endpoint, spinner) {
   if (introRes.status === 200 && parsedIntro.data && parsedIntro.data.__schema) {
     const typeCount = parsedIntro.data.__schema.types?.length || '?';
     const hasMutation = !!parsedIntro.data.__schema.mutationType?.name;
-    addFinding('ELEVEE', 'GraphQL', `Introspection enabled on ${endpoint}`,
-      `Schema introspection returned ${typeCount} type(s)${hasMutation ? ' (mutations exposed)' : ''}.\nAttacker can map every query, mutation, type, and field.`,
-      'Disable introspection in production. Apollo: introspection: false. Yoga: graphqlEndpoint with disabled introspection. Spring: spring.graphql.schema.introspection.enabled=false.');
+    addFinding(classifyHardeningSignal('graphql-introspection').severity, 'GraphQL', `Introspection enabled on ${endpoint}`,
+      `Schema introspection returned ${typeCount} type(s)${hasMutation ? ' and declares mutations' : ''}. Introspection reveals schema metadata but does not bypass resolver authorization.`,
+      'Keep introspection when it is an intentional developer feature. Disable it only when schema exposure conflicts with the deployment policy.');
   }
 
-  // 2. Query depth limit - send a deeply nested query
+  // 2. Query depth limit - use recursive introspection fields so the query is
+  // valid on every spec-compliant schema when introspection is available.
   spinner.text = `GraphQL: testing query depth on ${endpoint}...`;
-  const deepQuery = '{ a:__typename b:__typename c { ' + 'x { '.repeat(15) + '__typename' + ' }'.repeat(15) + ' } }';
+  const deepQuery = '{ __type(name: "Query") { fields { type { ' + 'ofType { '.repeat(15) + 'kind' + ' }'.repeat(15) + ' } } } }';
   const deepRes = await safeFetch(endpoint, {
     method: 'POST',
+    readOnly: 'graphql-query',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query: deepQuery }),
   });
@@ -3625,13 +3812,15 @@ async function testGraphQLEndpoint(endpoint, spinner) {
     try { depthBody = await deepRes.text(); } catch {}
     let parsedDepth;
     try { parsedDepth = JSON.parse(depthBody); } catch {}
-    // Only flag if the response is still valid GraphQL (otherwise something
-    // changed mid-scan or the server rejected the request shape, both fine).
-    const stillGraphQL = parsedDepth && (parsedDepth.data !== undefined || Array.isArray(parsedDepth.errors));
-    if (stillGraphQL && deepRes.status < 400 && !/depth|complexity|maximum|too\s+deep/i.test(depthBody)) {
-      addFinding('MOYENNE', 'GraphQL', `No query depth limit on ${endpoint}`,
-        'Server accepted a 15-level nested query without complaint. Vulnerable to DoS via deeply nested queries.',
-        'Add graphql-depth-limit (Node) or equivalent middleware. Recommended max depth: 5-7.');
+    const depthResult = classifyGraphqlDepthResponse(parsedDepth, deepRes.status);
+    if (depthResult?.kind === 'accepted') {
+      addFinding('MOYENNE', 'GraphQL', `Deep GraphQL query accepted on ${endpoint}`,
+        'Server returned data for a valid 15-level recursive type query without a depth or complexity rejection.',
+        'Apply a query depth or cost policy appropriate to the production schema.',
+        { classification: 'confirmed', confidence: 'high', rule_id: 'vice/graphql/deep-query-accepted' });
+    } else if (depthResult?.kind === 'protected') {
+      addFinding('INFO', 'GraphQL', `Query depth protection detected on ${endpoint}`,
+        'The server rejected the deep query with an explicit depth or complexity limit.', '');
     }
   }
 
@@ -3639,6 +3828,7 @@ async function testGraphQLEndpoint(endpoint, spinner) {
   spinner.text = `GraphQL: testing field suggestions on ${endpoint}...`;
   const typoRes = await safeFetch(endpoint, {
     method: 'POST',
+    readOnly: 'graphql-query',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query: '{ querType { name } }' }),
   });
@@ -3646,9 +3836,49 @@ async function testGraphQLEndpoint(endpoint, spinner) {
     let typoBody = '';
     try { typoBody = await typoRes.text(); } catch {}
     if (/did you mean/i.test(typoBody)) {
-      addFinding('FAIBLE', 'GraphQL', `Field suggestions enabled on ${endpoint}`,
+      addFinding(classifyHardeningSignal('graphql-suggestions').severity, 'GraphQL', `Field suggestions enabled on ${endpoint}`,
         'Server returns "Did you mean ..." messages on typos. Attackers use this to enumerate the schema even with introspection disabled.',
         'Disable field suggestions. Apollo: validationRules including NoFieldSuggestionsRule. graphql-js: --no-suggestions or custom validation.');
+    }
+  }
+
+  // 4. Bounded batching capability. Support alone is inventory, not a vulnerability.
+  spinner.text = `GraphQL: testing bounded batching on ${endpoint}...`;
+  const batchRes = await safeFetch(endpoint, {
+    method: 'POST',
+    readOnly: 'graphql-query',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify([{ query: '{ __typename }' }, { query: '{ __typename }' }]),
+  });
+  if (batchRes) {
+    let batchPayload;
+    try { batchPayload = JSON.parse(await batchRes.text()); } catch {}
+    const batch = classifyGraphqlBatchResponse(batchPayload, batchRes.status, 2);
+    if (batch?.kind === 'supported') {
+      addFinding('INFO', 'GraphQL', `GraphQL batching supported on ${endpoint}`, 'A bounded batch of two trivial operations returned two GraphQL responses. Batching support is not a vulnerability by itself.', 'Apply per-operation and aggregate batch cost limits.', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/graphql/batching-supported' });
+    } else if (batch?.kind === 'protected') {
+      addFinding('INFO', 'GraphQL', `GraphQL batching rejected on ${endpoint}`, 'The server explicitly rejected the bounded batch request.', '', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/graphql/batching-rejected' });
+    }
+  }
+
+  // 5. Bounded alias/cost probe with trivial fields and no expensive resolver.
+  spinner.text = `GraphQL: testing bounded alias cost on ${endpoint}...`;
+  const aliasCount = 20;
+  const aliasQuery = `{ ${Array.from({ length: aliasCount }, (_, index) => `viceAlias${index}: __typename`).join(' ')} }`;
+  const aliasRes = await safeFetch(endpoint, {
+    method: 'POST',
+    readOnly: 'graphql-query',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: aliasQuery }),
+  });
+  if (aliasRes) {
+    let aliasPayload;
+    try { aliasPayload = JSON.parse(await aliasRes.text()); } catch {}
+    const alias = classifyGraphqlAliasResponse(aliasPayload, aliasRes.status, aliasCount);
+    if (alias?.kind === 'accepted') {
+      addFinding('INFO', 'GraphQL', `Bounded alias query accepted on ${endpoint}`, `${aliasCount} trivial aliases were resolved. This only inventories cost-policy behavior and does not prove denial-of-service exposure.`, 'Use aggregate query cost limits for expensive production resolvers.', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/graphql/bounded-alias-accepted' });
+    } else if (alias?.kind === 'protected') {
+      addFinding('INFO', 'GraphQL', `GraphQL cost protection detected on ${endpoint}`, 'The server explicitly rejected the bounded alias query using a complexity or cost rule.', '', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/graphql/cost-protected' });
     }
   }
 }
@@ -3672,20 +3902,20 @@ async function auditWordPress(baseUrl, jsContents, spinner) {
   const usernames = new Set();
   for (let i = 1; i <= 10; i++) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${origin}/?author=${i}`, { signal: controller.signal, redirect: 'manual' });
-      clearTimeout(timeout);
+      const res = await safeFetch(`${origin}/?author=${i}`, { timeoutMs: 5000, redirect: 'manual', cache: 'no-store' });
+      if (!res) continue;
       const location = res.headers.get('location') || '';
       const m = location.match(/\/author\/([^\/?#]+)/i);
       if (m) usernames.add(m[1]);
     } catch {}
   }
   if (usernames.size > 0) {
-    addFinding('ELEVEE', 'WordPress',
+    const signal = classifyWordpressSurface('author-enumeration');
+    addFinding(signal.severity, 'WordPress',
       `User enumeration via ?author=N - ${usernames.size} username(s) leaked`,
       `Usernames: ${[...usernames].join(', ')}\nWordPress redirects /?author=N to /author/{username}/, leaking the login slug. Combined with the wp-login.php endpoint, this lets attackers brute-force exact accounts.`,
-      'Block /?author= queries: in .htaccess add "RewriteCond %{QUERY_STRING} author=" + "RewriteRule .* - [F]". Or use a security plugin (Wordfence, iThemes Security).');
+      'Limit login attempts and enable MFA. Hide author slugs only if they are not intentionally public.',
+      { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/wordpress/author-enumeration' });
   }
 
   // 2. /wp-json/wp/v2/users exposes user list
@@ -3696,10 +3926,12 @@ async function auditWordPress(baseUrl, jsContents, spinner) {
     try { users = await usersRes.json(); } catch {}
     if (Array.isArray(users) && users.length > 0) {
       const slugs = users.slice(0, 10).map(u => u.slug || u.name).filter(Boolean).join(', ');
-      addFinding('ELEVEE', 'WordPress',
+      const signal = classifyWordpressSurface('rest-users');
+      addFinding(signal.severity, 'WordPress',
         `/wp-json/wp/v2/users exposes ${users.length} user(s)`,
         `Slugs: ${slugs}\nThe REST API exposes the list of registered users including their login slugs.`,
-        `Restrict the endpoint via functions.php:\n  add_filter('rest_endpoints', function(\$ep) { unset(\$ep['/wp/v2/users']); unset(\$ep['/wp/v2/users/(?P<id>[\\\\d]+)']); return \$ep; });`);
+        'Restrict the endpoint when author identities are not intentionally public, and protect login with rate limits and MFA.',
+        { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/wordpress/rest-users' });
     }
   }
 
@@ -3711,10 +3943,12 @@ async function auditWordPress(baseUrl, jsContents, spinner) {
     try { body = await xmlrpcRes.text(); } catch {}
     const isActive = /XML-RPC server accepts POST requests only|methodCall/i.test(body) || xmlrpcRes.status === 405;
     if (isActive) {
-      addFinding('MOYENNE', 'WordPress',
+      const signal = classifyWordpressSurface('xmlrpc');
+      addFinding(signal.severity, 'WordPress',
         'xmlrpc.php exposed',
         `XML-RPC API is reachable. system.multicall lets attackers test thousands of password attempts in a single request, bypassing typical rate limiting.`,
-        `Disable xmlrpc.php in Apache (.htaccess):\n  <Files xmlrpc.php>\n    Require all denied\n  </Files>\nNginx: location ~* /xmlrpc\\.php { deny all; }`);
+        'Disable XML-RPC if unused, or enforce authentication and rate limiting.',
+        { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/wordpress/xmlrpc' });
     }
   }
 
@@ -3722,50 +3956,40 @@ async function auditWordPress(baseUrl, jsContents, spinner) {
   spinner.text = 'WordPress: testing wp-login.php...';
   const loginRes = await safeFetch(`${origin}/wp-login.php`);
   if (loginRes && loginRes.status === 200) {
-    addFinding('FAIBLE', 'WordPress',
+    const signal = classifyWordpressSurface('default-login');
+    addFinding(signal.severity, 'WordPress',
       'wp-login.php at default path',
-      'Login page is accessible at the standard URL, making automated brute-force easier.',
-      'Hide the login URL with a plugin like WPS Hide Login. Adds friction against bots scanning for /wp-login.php.');
+      'The standard WordPress login path is reachable. This is normal and does not prove weak authentication.',
+      'Use MFA, strong passwords and rate limiting instead of relying on a hidden login URL.',
+      { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/wordpress/default-login' });
   }
 
   // 5. wp-cron.php (DoS amplifier on shared hosting)
   const cronRes = await safeFetch(`${origin}/wp-cron.php`);
   if (cronRes && cronRes.status === 200) {
-    addFinding('FAIBLE', 'WordPress',
+    const signal = classifyWordpressSurface('http-cron');
+    addFinding(signal.severity, 'WordPress',
       'wp-cron.php publicly accessible',
-      'Anyone can trigger wp-cron.php. On shared hosting this can be used for resource exhaustion.',
-      'Disable HTTP-triggered cron in wp-config.php: define("DISABLE_WP_CRON", true);\nThen run cron via system cron: */15 * * * * php /path/wp-cron.php');
+      'The HTTP cron endpoint responded, but this alone does not prove exploitable resource exhaustion.',
+      'For high-traffic sites, consider disabling HTTP cron and using a system scheduler.',
+      { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/wordpress/http-cron' });
   }
 }
 
 // ──────────── SCORE DE SECURITE ────────────
 
-function calculateScore() {
-  const weights = { CRITIQUE: 15, ELEVEE: 8, MOYENNE: 3, FAIBLE: 1, INFO: 0 };
-  let penalty = 0;
-  for (const f of findings) {
-    penalty += weights[f.severity] || 0;
-  }
-  // Score de 0 a 100, degrade par les penalites
-  const rawScore = Math.max(0, 100 - penalty);
-  let grade, color;
-  if (rawScore >= 90) { grade = 'A'; color = chalk.green.bold; }
-  else if (rawScore >= 75) { grade = 'B'; color = chalk.cyan.bold; }
-  else if (rawScore >= 60) { grade = 'C'; color = chalk.yellow.bold; }
-  else if (rawScore >= 40) { grade = 'D'; color = chalk.red.bold; }
-  else if (rawScore >= 20) { grade = 'E'; color = chalk.bgRed.white.bold; }
-  else { grade = 'F'; color = chalk.bgRed.white.bold; }
-  return { score: rawScore, grade, color };
+export function calculateScanScore(sourceFindings = findings) {
+  return calculateCoreScore(sourceFindings, { minConfidence: 'medium' });
 }
 
 // ──────────── RAPPORT ────────────
 
 function printReport() {
-  const { score, grade, color } = calculateScore();
+  const { score, grade, color } = calculateScanScore();
 
   console.log('\n');
   console.log(chalk.bold('━'.repeat(60)));
-  console.log(chalk.hex('#995ff6').bold('  VICE') + chalk.gray(' — Rapport d\'audit de securite'));
+  console.log(chalk.hex('#995ff6').bold('  VICE') + chalk.gray(' - Rapport d\'audit de securite'));
   console.log(chalk.gray('  Webba Creative Technologies'));
   console.log(chalk.bold('━'.repeat(60)));
 
@@ -3810,30 +4034,59 @@ function printReport() {
   }
 
   console.log('\n' + chalk.bold('━'.repeat(60)));
-  console.log(`  Score: ${color(` ${grade} `)} (${score}/100) — Total: ${findings.length} finding(s)`);
-  console.log(chalk.gray('  VICE v3.0 — Webba Creative Technologies (c) 2026'));
+  console.log(`  Score: ${color(` ${grade} `)} (${score}/100) - Total: ${findings.length} finding(s)`);
+  console.log(chalk.gray(`  VICE v${ENGINE_VERSION} - Webba Creative Technologies (c) 2026`));
   console.log(chalk.bold('━'.repeat(60)) + '\n');
 }
 
-async function exportJson(url) {
-  const { score, grade } = calculateScore();
+export function buildBlackBoxReport(url, result = null, date = new Date().toISOString()) {
+  const calculated = result?.score_breakdown || calculateScanScore(result?.findings || findings);
+  const hasResultScore = result && Object.hasOwn(result, 'score');
+  const hasResultGrade = result && Object.hasOwn(result, 'grade');
+  return {
+    url,
+    date,
+    score: hasResultScore ? result.score : calculated.score,
+    grade: hasResultGrade ? result.grade : calculated.grade,
+    engine_version: result?.engine_version || ENGINE_VERSION,
+    ruleset_version: result?.ruleset_version || RULESET_VERSION,
+    scoring_version: result?.scoring_version || SCORING_VERSION,
+    score_reliable: result?.score_reliable ?? null,
+    modules: result?.modules || null,
+    errors: result?.errors || [],
+    metrics: result?.metrics || null,
+    coverage: result?.coverage || null,
+    score_breakdown: {
+      total_penalty: calculated.total_penalty,
+      breakdown: calculated.breakdown,
+      excluded: calculated.excluded,
+      min_confidence: calculated.min_confidence,
+    },
+    completed_at: result?.completed_at || null,
+    findings: result?.findings || findings,
+  };
+}
+
+async function exportJson(url, result = null) {
   const fs = await import('fs');
   const path = await import('path');
   const dir = path.default.join(getViceDataDir(), 'scans');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const filename = path.default.join(dir, `vice-report-${new URL(url).hostname}-${Date.now()}.json`);
-  fs.writeFileSync(filename, JSON.stringify({ url, date: new Date().toISOString(), score, grade, findings }, null, 2));
+  fs.writeFileSync(filename, JSON.stringify(buildBlackBoxReport(url, result), null, 2));
   console.log(chalk.gray(`  Rapport JSON exporte: ${filename}\n`));
 }
 
 async function exportHtml(url) {
-  const { score, grade } = calculateScore();
+  const { score, grade } = calculateScanScore();
   const hostname = new URL(url).hostname;
   const fs = await import('fs');
   const path = await import('path');
   const dir = path.default.join(getViceDataDir(), 'scans');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const filename = path.default.join(dir, `vice-report-${hostname}-${Date.now()}.html`);
+  const safeHostname = escapeHtml(hostname);
+  const safeUrl = escapeHtml(url);
 
   const allSevs = ['CRITICAL','CRITIQUE','HIGH','ELEVEE','MEDIUM','MOYENNE','LOW','FAIBLE','INFO'];
   const sevOrder = {CRITICAL:0,CRITIQUE:0,HIGH:1,ELEVEE:1,MEDIUM:2,MOYENNE:2,LOW:3,FAIBLE:3,INFO:4};
@@ -3846,16 +4099,16 @@ async function exportHtml(url) {
   let findingsHtml = '';
   let currentModule = '';
   for (const f of sorted) {
-    if (f.module !== currentModule) { currentModule = f.module; findingsHtml += `<div class="module-title">${currentModule}</div>`; }
-    const detail = (f.detail||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const reco = (f.recommendation||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    findingsHtml += `<div class="finding"><div class="finding-header"><span class="badge" style="background:${sevColors[f.severity]||'#888'}">${sevLabels[f.severity]||f.severity}</span><span class="finding-title">${f.title}</span></div>${detail?`<pre class="finding-detail">${detail}</pre>`:''}${reco?`<div class="finding-reco">${reco}</div>`:''}</div>`;
+    if (f.module !== currentModule) { currentModule = f.module; findingsHtml += `<div class="module-title">${escapeHtml(currentModule)}</div>`; }
+    const detail = escapeHtml(f.detail);
+    const reco = escapeHtml(f.recommendation);
+    findingsHtml += `<div class="finding"><div class="finding-header"><span class="badge" style="background:${sevColors[f.severity]||'#888'}">${escapeHtml(sevLabels[f.severity]||f.severity)}</span><span class="finding-title">${escapeHtml(f.title)}</span></div>${detail?`<pre class="finding-detail">${detail}</pre>`:''}${reco?`<div class="finding-reco">${reco}</div>`:''}</div>`;
   }
   const statsHtml = allSevs.filter(s=>counts[s]).map(s=>`<span class="stat-pill" style="background:${sevColors[s]}">${sevLabels[s]} ${counts[s]}</span>`).join('');
   const dateStr = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
   const timeStr = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
-  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>VICE Report — ${hostname}</title><style>:root{--primary:#995ff6;--accent:#ee967a;--bg:#fafafa;--card:#fff;--text:#2c2c2c;--text-light:#6b6b6b;--text-muted:#9a9a9a;--border:#e8e8e8}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}.container{max-width:780px;margin:0 auto;padding:48px 24px 64px}.header{margin-bottom:48px}.header-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px}.logo{font-size:14px;font-weight:600;color:var(--primary);letter-spacing:2px;text-transform:uppercase}.date{font-size:13px;color:var(--text-muted)}.target{font-size:28px;font-weight:700;color:var(--text);margin-bottom:4px;word-break:break-all}.target-url{font-size:14px;color:var(--text-light);margin-bottom:32px}.score-section{display:flex;align-items:center;gap:24px;padding:28px 32px;background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px}.grade-circle{width:72px;height:72px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:#fff;flex-shrink:0}.score-info{flex:1}.score-number{font-size:20px;font-weight:700;color:var(--text)}.score-label{font-size:13px;color:var(--text-muted);margin-top:2px}.stats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:40px}.stat-pill{display:inline-block;padding:4px 14px;border-radius:100px;font-size:12px;font-weight:600;color:#fff;letter-spacing:.3px}.module-title{font-size:16px;font-weight:700;color:var(--text);margin-top:36px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border)}.module-title:first-child{margin-top:0}.finding{padding:16px 20px;background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:10px}.finding-header{display:flex;align-items:flex-start;gap:10px;margin-bottom:6px}.badge{display:inline-block;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;color:#fff;text-transform:uppercase;letter-spacing:.5px;flex-shrink:0;margin-top:2px}.finding-title{font-size:14px;font-weight:600;color:var(--text);line-height:1.4}.finding-detail{font-family:'SF Mono','Fira Code','Consolas',monospace;font-size:12px;line-height:1.5;color:var(--text-light);background:#f5f5f5;border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin:8px 0;white-space:pre-wrap;word-break:break-word;overflow-x:auto}.finding-reco{font-size:13px;color:#27ae60;margin-top:8px;padding-left:2px;line-height:1.5}.finding-reco::before{content:"\\2192  "}.footer{margin-top:56px;padding-top:24px;border-top:1px solid var(--border);text-align:center;font-size:12px;color:var(--text-muted);line-height:1.8}.footer a{color:var(--primary);text-decoration:none}.footer a:hover{text-decoration:underline}@media(max-width:600px){.container{padding:24px 16px 48px}.header-top{flex-direction:column;align-items:flex-start;gap:8px}.target{font-size:22px}.score-section{flex-direction:column;text-align:center;padding:24px}.finding-header{flex-direction:column;gap:6px}}</style></head><body><div class="container"><div class="header"><div class="header-top"><div class="logo">VICE</div><div class="date">${dateStr} at ${timeStr}</div></div><div class="target">${hostname}</div><div class="target-url">${url}</div></div><div class="score-section"><div class="grade-circle" style="background:${gradeColors[grade]||'#888'}">${grade}</div><div class="score-info"><div class="score-number">${score} / 100</div><div class="score-label">${findings.length} finding${findings.length!==1?'s':''} detected</div></div></div><div class="stats">${statsHtml}</div>${findingsHtml}<div class="footer">Generated by <a href="https://github.com/Webba-Creative-Technologies/vice">VICE</a> v3.0<br><a href="https://webba-creative.com">Webba Creative Technologies</a> &copy; 2026<br>This tool is intended for authorized security testing only.</div></div></body></html>`;
-  fs.writeFileSync(filename, html);
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"><title>VICE Report - ${safeHostname}</title><style>:root{--primary:#995ff6;--accent:#ee967a;--bg:#fafafa;--card:#fff;--text:#2c2c2c;--text-light:#6b6b6b;--text-muted:#9a9a9a;--border:#e8e8e8}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}.container{max-width:780px;margin:0 auto;padding:48px 24px 64px}.header{margin-bottom:48px}.header-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px}.logo{font-size:14px;font-weight:600;color:var(--primary);letter-spacing:2px;text-transform:uppercase}.date{font-size:13px;color:var(--text-muted)}.target{font-size:28px;font-weight:700;color:var(--text);margin-bottom:4px;word-break:break-all}.target-url{font-size:14px;color:var(--text-light);margin-bottom:32px}.score-section{display:flex;align-items:center;gap:24px;padding:28px 32px;background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px}.grade-circle{width:72px;height:72px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:#fff;flex-shrink:0}.score-info{flex:1}.score-number{font-size:20px;font-weight:700;color:var(--text)}.score-label{font-size:13px;color:var(--text-muted);margin-top:2px}.stats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:40px}.stat-pill{display:inline-block;padding:4px 14px;border-radius:100px;font-size:12px;font-weight:600;color:#fff;letter-spacing:.3px}.module-title{font-size:16px;font-weight:700;color:var(--text);margin-top:36px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border)}.module-title:first-child{margin-top:0}.finding{padding:16px 20px;background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:10px}.finding-header{display:flex;align-items:flex-start;gap:10px;margin-bottom:6px}.badge{display:inline-block;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;color:#fff;text-transform:uppercase;letter-spacing:.5px;flex-shrink:0;margin-top:2px}.finding-title{font-size:14px;font-weight:600;color:var(--text);line-height:1.4}.finding-detail{font-family:'SF Mono','Fira Code','Consolas',monospace;font-size:12px;line-height:1.5;color:var(--text-light);background:#f5f5f5;border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin:8px 0;white-space:pre-wrap;word-break:break-word;overflow-x:auto}.finding-reco{font-size:13px;color:#27ae60;margin-top:8px;padding-left:2px;line-height:1.5}.finding-reco::before{content:"\\2192  "}.footer{margin-top:56px;padding-top:24px;border-top:1px solid var(--border);text-align:center;font-size:12px;color:var(--text-muted);line-height:1.8}.footer a{color:var(--primary);text-decoration:none}.footer a:hover{text-decoration:underline}@media(max-width:600px){.container{padding:24px 16px 48px}.header-top{flex-direction:column;align-items:flex-start;gap:8px}.target{font-size:22px}.score-section{flex-direction:column;text-align:center;padding:24px}.finding-header{flex-direction:column;gap:6px}}</style></head><body><div class="container"><div class="header"><div class="header-top"><div class="logo">VICE</div><div class="date">${dateStr} at ${timeStr}</div></div><div class="target">${safeHostname}</div><div class="target-url">${safeUrl}</div></div><div class="score-section"><div class="grade-circle" style="background:${gradeColors[grade]||'#888'}">${grade}</div><div class="score-info"><div class="score-number">${score} / 100</div><div class="score-label">${findings.length} finding${findings.length!==1?'s':''} detected</div></div></div><div class="stats">${statsHtml}</div>${findingsHtml}<div class="footer">Generated by <a href="https://github.com/Webba-Creative-Technologies/vice">VICE</a> v3.0<br><a href="https://webba-creative.com">Webba Creative Technologies</a> &copy; 2026<br>This tool is intended for authorized security testing only.</div></div></body></html>`;
+  fs.writeFileSync(filename, html.replace('VICE</a> v3.0<br>', `VICE</a> v${ENGINE_VERSION}<br>`));
   console.log(chalk.gray(`  HTML report exported: ${filename}\n`));
 }
 
@@ -3912,7 +4165,7 @@ async function viewHistory() {
       name: 'selectedScan',
       message: chalk.bold('Selectionner un scan:'),
       choices: scans.map((s, i) => ({
-        name: `${gradeColor(s.grade)} ${s.score}/100 — ${s.hostname} — ${s.date} — ${s.nbFindings} findings (${s.critiques} critiques)`,
+        name: `${gradeColor(s.grade)} ${s.score}/100 - ${s.hostname} - ${s.date} - ${s.nbFindings} findings (${s.critiques} critiques)`,
         value: i,
       })),
       pageSize: 15,
@@ -3924,8 +4177,8 @@ async function viewHistory() {
   // Afficher le rapport
   console.log('\n');
   console.log(chalk.bold('━'.repeat(60)));
-  console.log(chalk.hex('#995ff6').bold('  VICE') + chalk.gray(' — Rapport sauvegarde'));
-  console.log(chalk.gray(`  ${scan.hostname} — ${scan.date}`));
+  console.log(chalk.hex('#995ff6').bold('  VICE') + chalk.gray(' - Rapport sauvegarde'));
+  console.log(chalk.gray(`  ${scan.hostname} - ${scan.date}`));
   console.log(chalk.gray('  Webba Creative Technologies'));
   console.log(chalk.bold('━'.repeat(60)));
 
@@ -3961,8 +4214,8 @@ async function viewHistory() {
   }
 
   console.log('\n' + chalk.bold('━'.repeat(60)));
-  console.log(`  Score: ${gradeColorFn(` ${scan.grade} `)} (${scan.score}/100) — Total: ${scan.nbFindings} finding(s)`);
-  console.log(chalk.gray('  VICE v3.0 — Webba Creative Technologies (c) 2026'));
+  console.log(`  Score: ${gradeColorFn(` ${scan.grade} `)} (${scan.score}/100) - Total: ${scan.nbFindings} finding(s)`);
+  console.log(chalk.gray(`  VICE v${ENGINE_VERSION} - Webba Creative Technologies (c) 2026`));
   console.log(chalk.bold('━'.repeat(60)) + '\n');
 
   // Proposer d'exporter en HTML si c'est un JSON
@@ -3997,6 +4250,252 @@ async function viewHistory() {
   if (postAction === 'back') {
     await viewHistory();
   }
+}
+
+// ──────────── LIBRARY API ────────────
+
+function silentSpinner() {
+  return {
+    text: '',
+    succeed() {},
+    fail() {},
+    warn() {},
+    info() {},
+    start() { return this; },
+    stop() {},
+  };
+}
+
+function emitScanProgress(onProgress, event) {
+  if (typeof onProgress !== 'function') return;
+  try {
+    onProgress(event);
+  } catch {}
+}
+
+function progressSpinner(module, onProgress) {
+  let message = '';
+  return {
+    get text() { return message; },
+    set text(value) {
+      message = String(value || '');
+      emitScanProgress(onProgress, { stage: 'progress', module, message });
+    },
+    succeed(value) {
+      emitScanProgress(onProgress, { stage: 'complete', module, message: String(value || message) });
+    },
+    fail(value) {
+      emitScanProgress(onProgress, { stage: 'error', module, message: String(value || message) });
+    },
+    warn(value) {
+      emitScanProgress(onProgress, { stage: 'warning', module, message: String(value || message) });
+    },
+    info(value) {
+      emitScanProgress(onProgress, { stage: 'progress', module, message: String(value || message) });
+    },
+    start() { return this; },
+    stop() {},
+  };
+}
+
+function normalizeScanUrl(url) {
+  const parsed = new URL(url.includes('://') ? url : `https://${url}`);
+  parsed.hash = '';
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+async function runStep(name, fn, errors, metrics, signal, onProgress) {
+  if (signal?.aborted) throw signal.reason || new Error('scan_cancelled');
+  const spinner = progressSpinner(name, onProgress);
+  emitScanProgress(onProgress, { stage: 'start', module: name, message: `Running ${name}...` });
+  try {
+    const result = await metrics.run(name, () => fn(typeof onProgress === 'function' ? spinner : silentSpinner()));
+    if (signal?.aborted) throw signal.reason || new Error('scan_cancelled');
+    emitScanProgress(onProgress, { stage: 'complete', module: name, message: `${name} complete` });
+    return result;
+  } catch (err) {
+    if (signal?.aborted) throw signal.reason || err;
+    const message = err instanceof Error ? err.message : String(err);
+    errors.push({ module: name, message });
+    emitScanProgress(onProgress, { stage: 'error', module: name, message });
+  }
+}
+
+/**
+ * Worker-friendly scan API.
+ *
+ * This does not prompt, print reports, or write local scan artifacts. It reuses
+ * the CLI modules and returns serializable JSON for platform workers.
+ */
+async function runScanInternal(config, httpClient, context) {
+  if (!config.url) throw new Error('runScan requires a url');
+
+  const modules = config.modules?.length ? config.modules : DEFAULT_LIBRARY_MODULES;
+  const baseUrl = normalizeScanUrl(config.url);
+  const errors = [];
+  const metrics = createScanMetrics({ getFindingCount: () => context.findings.length });
+  const executeStep = (name, fn) => runStep(name, fn, errors, metrics, context.signal, config.onProgress);
+  let jsContents = [];
+  let supabaseAudit = null;
+  const supabaseCreds = config.supabaseUrl
+    ? { url: config.supabaseUrl, key: config.supabaseKey || null }
+    : null;
+
+  if (modules.includes('js') || modules.includes('supabase') || modules.includes('authinjection') || modules.includes('api') || modules.includes('storage') || modules.includes('websocket')) {
+    await executeStep('crawl', async (spinner) => {
+      const result = await crawlAndExtract(baseUrl, spinner, { reportFindings: modules.includes('js') });
+      jsContents = result.scripts;
+    });
+  }
+
+  if (modules.includes('js') && jsContents.length > 0) {
+    await executeStep('js', (spinner) => analyzeScripts(jsContents, spinner));
+  }
+
+  if (modules.includes('files')) {
+    await executeStep('files', (spinner) => checkSensitivePaths(baseUrl, spinner));
+  }
+
+  if (modules.includes('headers')) {
+    await executeStep('headers', (spinner) => checkHeaders(baseUrl, spinner));
+  }
+
+  // Run when the module is selected AND we either crawled scripts or were handed
+  // explicit credentials (supabase-deep passes creds without a crawl).
+  if (modules.includes('supabase') && (jsContents.length > 0 || supabaseCreds)) {
+    supabaseAudit = await executeStep('supabase', (spinner) => auditSupabase(jsContents, spinner, supabaseCreds));
+  }
+
+  if (modules.includes('authinjection') && jsContents.length > 0) {
+    await executeStep('authinjection', (spinner) => auditAuthInjection(jsContents, spinner));
+  }
+
+  if (modules.includes('vps')) {
+    await executeStep('vps', (spinner) => auditVps(spinner));
+  }
+
+  if (modules.includes('attacks')) {
+    await executeStep('attacks', (spinner) => auditAttackScenarios(baseUrl, jsContents, spinner));
+  }
+
+  if (modules.includes('login')) {
+    await executeStep('login', (spinner) => auditLoginSecurity(baseUrl, spinner));
+  }
+
+  if (modules.includes('subdomains')) {
+    await executeStep('subdomains', (spinner) => scanSubdomains(baseUrl, spinner));
+  }
+
+  if (modules.includes('dns')) {
+    await executeStep('dns', (spinner) => auditDns(baseUrl, spinner));
+  }
+
+  if (modules.includes('api') && jsContents.length > 0) {
+    await executeStep('api', (spinner) => auditApiEndpoints(baseUrl, jsContents, spinner));
+  }
+
+  if (modules.includes('storage') && jsContents.length > 0) {
+    await executeStep('storage', (spinner) => auditStorage(jsContents, spinner));
+  }
+
+  if (modules.includes('websocket') && jsContents.length > 0) {
+    await executeStep('websocket', (spinner) => auditWebsockets(baseUrl, jsContents, spinner));
+  }
+
+  if (modules.includes('wordpress')) {
+    await executeStep('wordpress', (spinner) => auditWordPress(baseUrl, jsContents, spinner));
+  }
+
+  if (modules.includes('tls')) {
+    await executeStep('tls', (spinner) => auditTls(baseUrl, spinner));
+  }
+
+  if (modules.includes('stack')) {
+    await executeStep('stack', (spinner) => detectStack(baseUrl, jsContents, spinner));
+  }
+
+  const score = calculateScanScore(context.findings);
+  const scanMetrics = metrics.finish();
+  scanMetrics.network = httpClient.metrics();
+  scanMetrics.browser = { ...context.browserMetrics };
+  scanMetrics.scope = context.scope.metrics();
+  const limitations = [];
+  if (scanMetrics.network.budget_exhausted) limitations.push('network_budget_exhausted');
+  if (scanMetrics.scope.budget_exhausted) limitations.push('dns_budget_exhausted');
+  if (modules.includes('supabase') && supabaseAudit?.inventoryComplete === false) limitations.push('supabase_schema_inventory_unavailable');
+  const coverage = summarizeCoverage(modules, scanMetrics.steps, { limitations });
+  const supabaseOnly = modules.length === 1 && modules[0] === 'supabase';
+  const scoreAvailable = !supabaseOnly || supabaseAudit?.scoreAvailable === true;
+  return {
+    target: baseUrl,
+    score: scoreAvailable ? score.score : null,
+    grade: scoreAvailable ? score.grade : null,
+    scoring_version: SCORING_VERSION,
+    findings: [...context.findings],
+    errors,
+    modules,
+    metrics: scanMetrics,
+    coverage,
+    score_reliable: coverage.status === 'complete',
+    engine_version: ENGINE_VERSION,
+    ruleset_version: RULESET_VERSION,
+    score_breakdown: {
+      total_penalty: score.total_penalty,
+      breakdown: score.breakdown,
+      excluded: score.excluded,
+      min_confidence: score.min_confidence,
+    },
+    completed_at: new Date().toISOString(),
+  };
+}
+
+async function runScan(config = {}) {
+  if (!config.url) throw new Error('runScan requires a url');
+  const baseUrl = normalizeScanUrl(config.url);
+  const modules = config.modules?.length ? config.modules : DEFAULT_LIBRARY_MODULES;
+  const allowedHosts = new Set(config.allowedHosts || []);
+  if (config.supabaseUrl) {
+    try { allowedHosts.add(new URL(config.supabaseUrl).hostname); } catch {}
+  }
+  const trustedHosts = new Set(config.trustedHosts || []);
+  if (modules.includes('subdomains')) trustedHosts.add('crt.sh');
+  const allowedPorts = new Set((config.allowedPorts || []).map(String));
+  if (modules.includes('vps')) {
+    for (const { port } of COMMON_PORTS) allowedPorts.add(String(port));
+  }
+  const scope = createScopePolicy(baseUrl, {
+    allowedHosts: [...allowedHosts],
+    trustedHosts: [...trustedHosts],
+    allowedPorts: allowedPorts.size > 0 ? [...allowedPorts] : undefined,
+    includeSubdomains: config.includeSubdomains !== false,
+    allowPrivateTargets: config.allowPrivateTargets === true,
+    resolver: config.scopeResolver,
+    maxDnsResolutions: config.maxDnsResolutions,
+    maxDnsAnswers: config.maxDnsAnswers,
+  });
+  await scope.assertUrl(baseUrl);
+  const authContext = config.authCookie || config.authHeader
+    ? parseAuthString(config.authCookie, config.authHeader)
+    : null;
+  const context = createScanContext({ authContext, signal: config.signal || null, scope });
+  const httpClient = createHttpClient({
+    timeoutMs: config.requestTimeoutMs,
+    maxResponseBytes: config.maxResponseBytes,
+    maxCacheEntries: config.maxCacheEntries,
+    maxRedirects: config.maxRedirects,
+    maxNetworkRequests: config.maxNetworkRequests,
+    maxTotalResponseBytes: config.maxTotalResponseBytes,
+    signal: config.signal || null,
+    scope,
+  });
+  return withScanContext(context, () => withHttpClient(httpClient, async () => {
+    try {
+      return await runScanInternal(config, httpClient, context);
+    } finally {
+      await Promise.all([...context.browsers].map(browser => browser.close().catch(() => {})));
+      context.browsers.clear();
+    }
+  }));
 }
 
 // ──────────── MAIN ────────────
@@ -4056,201 +4555,38 @@ async function main(options = {}) {
   const baseUrl = url.replace(/\/+$/, '');
   console.log('');
 
-  let jsContents = [];
-
-  // STEP 1: Crawl
-  if (modules.includes('js') || modules.includes('supabase') || modules.includes('authinjection')) {
-    const spinner = ora({ text: 'Starting crawl...', color: 'magenta' }).start();
-    try {
-      const result = await crawlAndExtract(baseUrl, spinner);
-      jsContents = result.scripts;
-      spinner.succeed(chalk.green(`Crawl complete — ${jsContents.length} scripts collected`));
-    } catch (err) {
-      spinner.fail(chalk.red(`Crawl failed: ${err.message}`));
+  const scanSpinner = ora({ text: 'Starting scan...', color: 'magenta' }).start();
+  let result;
+  try {
+    result = await runScan({
+      url: baseUrl,
+      modules,
+      authCookie: options.authCookie,
+      authHeader: options.authHeader,
+      onProgress: ({ stage, module, message }) => {
+        if (stage === 'start') scanSpinner.text = `Running ${module}...`;
+        else if (message) scanSpinner.text = message;
+      },
+    });
+    if (result.errors.length > 0) {
+      scanSpinner.warn(`Scan completed with ${result.errors.length} module error(s)`);
+    } else {
+      scanSpinner.succeed('Scan complete');
     }
+  } catch (error) {
+    scanSpinner.fail('Scan failed');
+    throw error;
   }
-
-  // STEP 2: JS Analysis
-  if (modules.includes('js') && jsContents.length > 0) {
-    const spinner = ora({ text: 'Analyzing secrets...', color: 'magenta' }).start();
-    try {
-      analyzeScripts(jsContents, spinner);
-      spinner.succeed(chalk.green('Secret analysis complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Analysis failed: ${err.message}`));
-    }
-  }
-
-  // STEP 3: Sensitive files
-  if (modules.includes('files')) {
-    const spinner = ora({ text: 'Checking sensitive files...', color: 'magenta' }).start();
-    try {
-      await checkSensitivePaths(baseUrl, spinner);
-      spinner.succeed(chalk.green('Sensitive files check complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Check failed: ${err.message}`));
-    }
-  }
-
-  // STEP 4: HTTP Headers
-  if (modules.includes('headers')) {
-    const spinner = ora({ text: 'Analyzing HTTP headers...', color: 'magenta' }).start();
-    try {
-      await checkHeaders(baseUrl, spinner);
-      spinner.succeed(chalk.green('Headers analysis complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Analysis failed: ${err.message}`));
-    }
-  }
-
-  // STEP 5: Supabase
-  if (modules.includes('supabase') && jsContents.length > 0) {
-    const spinner = ora({ text: 'Supabase audit...', color: 'magenta' }).start();
-    try {
-      await auditSupabase(jsContents, spinner);
-      spinner.succeed(chalk.green('Supabase audit complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Supabase audit failed: ${err.message}`));
-    }
-  }
-
-  // STEP 6: Auth Injection
-  if (modules.includes('authinjection') && jsContents.length > 0) {
-    const spinner = ora({ text: 'Auth injection test...', color: 'red' }).start();
-    try {
-      await auditAuthInjection(jsContents, spinner);
-      spinner.succeed(chalk.green('Auth injection test complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Auth injection failed: ${err.message}`));
-    }
-  }
-
-  // STEP 7: VPS Audit
-  if (modules.includes('vps')) {
-    const spinner = ora({ text: 'VPS audit...', color: 'red' }).start();
-    try {
-      await auditVps(spinner);
-      spinner.succeed(chalk.green('VPS audit complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`VPS audit failed: ${err.message}`));
-    }
-  }
-
-  // STEP 8: Attack tests
-  if (modules.includes('attacks')) {
-    const spinner = ora({ text: 'Running attack tests...', color: 'red' }).start();
-    try {
-      await auditAttackScenarios(baseUrl, jsContents, spinner);
-      spinner.succeed(chalk.green('Attack tests complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Attack tests failed: ${err.message}`));
-    }
-  }
-
-  // STEP 9: Login Audit
-  if (modules.includes('login')) {
-    const spinner = ora({ text: 'Login security audit...', color: 'red' }).start();
-    try {
-      await auditLoginSecurity(baseUrl, spinner);
-      spinner.succeed(chalk.green('Login audit complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Login audit failed: ${err.message}`));
-    }
-  }
-
-  // STEP 10: Subdomains
-  if (modules.includes('subdomains')) {
-    const spinner = ora({ text: 'Scanning subdomains...', color: 'magenta' }).start();
-    try {
-      await scanSubdomains(baseUrl, spinner);
-      spinner.succeed(chalk.green('Subdomain scan complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Subdomain scan failed: ${err.message}`));
-    }
-  }
-
-  // STEP 11: DNS & Email
-  if (modules.includes('dns')) {
-    const spinner = ora({ text: 'DNS & Email audit...', color: 'magenta' }).start();
-    try {
-      await auditDns(baseUrl, spinner);
-      spinner.succeed(chalk.green('DNS & Email audit complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`DNS audit failed: ${err.message}`));
-    }
-  }
-
-  // STEP 12: API Endpoints
-  if (modules.includes('api') && jsContents.length > 0) {
-    const spinner = ora({ text: 'API endpoint audit...', color: 'magenta' }).start();
-    try {
-      await auditApiEndpoints(baseUrl, jsContents, spinner);
-      spinner.succeed(chalk.green('API audit complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`API audit failed: ${err.message}`));
-    }
-  }
-
-  // STEP 13: Storage / Buckets
-  if (modules.includes('storage') && jsContents.length > 0) {
-    const spinner = ora({ text: 'Storage bucket audit...', color: 'magenta' }).start();
-    try {
-      await auditStorage(jsContents, spinner);
-      spinner.succeed(chalk.green('Storage audit complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Storage audit failed: ${err.message}`));
-    }
-  }
-
-  // STEP 14: WebSocket / Realtime
-  if (modules.includes('websocket') && jsContents.length > 0) {
-    const spinner = ora({ text: 'WebSocket / Realtime audit...', color: 'magenta' }).start();
-    try {
-      await auditWebsockets(baseUrl, jsContents, spinner);
-      spinner.succeed(chalk.green('WebSocket audit complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`WebSocket audit failed: ${err.message}`));
-    }
-  }
-
-  // STEP 15b: WordPress specifics
-  if (modules.includes('wordpress')) {
-    const spinner = ora({ text: 'WordPress audit...', color: 'magenta' }).start();
-    try {
-      await auditWordPress(baseUrl, jsContents, spinner);
-      spinner.succeed(chalk.green('WordPress audit complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`WordPress audit failed: ${err.message}`));
-    }
-  }
-
-  // STEP 15a: TLS deeper analysis
-  if (modules.includes('tls')) {
-    const spinner = ora({ text: 'TLS analysis...', color: 'magenta' }).start();
-    try {
-      await auditTls(baseUrl, spinner);
-      spinner.succeed(chalk.green('TLS analysis complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`TLS analysis failed: ${err.message}`));
-    }
-  }
-
-  // STEP 15: Stack Detection
-  if (modules.includes('stack')) {
-    const spinner = ora({ text: 'Detecting tech stack...', color: 'magenta' }).start();
-    try {
-      await detectStack(baseUrl, jsContents, spinner);
-      spinner.succeed(chalk.green('Stack detection complete'));
-    } catch (err) {
-      spinner.fail(chalk.red(`Stack detection failed: ${err.message}`));
-    }
-  }
-
+  findings.length = 0;
+  findings.push(...result.findings);
   // REPORT
   printReport();
+  if (!result.score_reliable) {
+    console.log(chalk.yellow('  Score provisional: some checks were incomplete. See coverage in the JSON report.\n'));
+  }
 
   // Auto-save JSON to scans/
-  await exportJson(baseUrl);
+  await exportJson(baseUrl, result);
 
   // Optional HTML export
   const { wantHtml } = await inquirer.prompt([
@@ -4266,10 +4602,10 @@ async function main(options = {}) {
     await exportHtml(baseUrl);
   }
 
-  console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' — Scan complete.\n'));
+  console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' - Scan complete.\n'));
 }
 
-export { main };
+export { main, runScan, ALL_MODULES, PASSIVE_MODULES };
 
 // Run directly if this file is the entry point
 const isDirectRun = process.argv[1] && (

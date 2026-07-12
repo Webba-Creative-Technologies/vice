@@ -1,11 +1,12 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — Code Vulnerability Scanner
+// VICE LOCAL - Code Vulnerability Scanner
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
 import fs from 'fs';
 import path from 'path';
 import { addFinding } from '../core/findings.js';
+import { classifyCodeSink } from '../core/detectors/code-sinks.js';
 import { isInComment } from '../utils/comments.js';
 
 async function findFiles(dir, extensions, ignore = ['node_modules', '.git', '.next', '.nuxt', 'dist', 'build', '.output', 'coverage', 'scans']) {
@@ -28,6 +29,15 @@ function getLineNum(content, position) {
   return content.substring(0, position).split('\n').length;
 }
 
+function statementAround(content, position, maxLength = 600) {
+  const previousSemicolon = content.lastIndexOf(';', position);
+  const previousBlock = content.lastIndexOf('\n\n', position);
+  const start = Math.max(previousSemicolon, previousBlock, position - 120) + 1;
+  const nextSemicolon = content.indexOf(';', position);
+  const end = nextSemicolon === -1 ? position + maxLength : nextSemicolon + 1;
+  return content.slice(start, Math.min(content.length, end, position + maxLength));
+}
+
 export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored = () => false) {
   spinner.text = 'Scanning code for vulnerabilities...';
   const codeFiles = await findFiles(projectPath, ['.js', '.ts', '.jsx', '.tsx', '.vue', '.svelte']);
@@ -40,14 +50,25 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
     if (isIgnored(rel)) continue;
 
     const seen = new Set();
-    const reportOnce = (severity, ruleId, line, title, detail, recommendation) => {
-      const key = `${ruleId}:${line}`;
+    const reportOnce = (signal, ruleId, line, detail, recommendation) => {
+      const family = ruleId.startsWith('sqli-') ? 'sqli' : ruleId;
+      const key = `${family}:${line}`;
       if (seen.has(key)) return;
       seen.add(key);
-      addFinding(severity, 'Code Vulnerabilities', title, detail, recommendation, { file: rel, line });
+      addFinding(
+        signal.severity,
+        'Code Vulnerabilities',
+        `${signal.title} in ${rel}:${line}`,
+        detail,
+        recommendation,
+        { file: rel, line },
+        signal.confidence,
+        { rule_id: `vice/code/${ruleId}`, classification: signal.classification },
+      );
     };
 
-    // SQL Injection
+    // SQL construction: direct request sources stay critical, while an
+    // unproven dynamic identifier is kept as a low-confidence review signal.
     const sqlPatterns = [
       { regex: /(?:query|execute|raw|sql)\s*\(\s*`[^`]*\$\{/gi, name: 'Template literal in SQL query', id: 'sqli-template' },
       { regex: /(?:query|execute|raw)\s*\(\s*['"][^'"]*['"]\s*\+/gi, name: 'String concatenation in SQL query', id: 'sqli-concat' },
@@ -59,26 +80,33 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
       while ((match = regex.exec(content)) !== null) {
         if (isInComment(content, match.index, rel)) continue;
         const line = getLineNum(content, match.index);
-        const context = content.substring(match.index, match.index + 80).replace(/\n/g, ' ');
-        reportOnce('CRITICAL', id, line, `SQL Injection: ${name}`, `${rel}:${line}\n  ${context}`, 'Use prepared statements with parameters ($1, ?) instead of concatenation/interpolation');
+        const statement = statementAround(content, match.index);
+        const signal = classifyCodeSink('sql', statement);
+        if (!signal) continue;
+        const context = statement.slice(0, 240).replace(/\s+/g, ' ').trim();
+        reportOnce(signal, id, line, `${name}\n${rel}:${line}\n  ${context}`, 'Use prepared statements with parameters ($1, ?) instead of concatenation/interpolation');
       }
     }
 
-    // XSS — dangerouslySetInnerHTML
+    // XSS - dangerouslySetInnerHTML
     let match;
     const dangerousHtml = /dangerouslySetInnerHTML\s*=\s*\{\s*\{\s*__html\s*:/g;
     while ((match = dangerousHtml.exec(content)) !== null) {
       if (isInComment(content, match.index, rel)) continue;
       const line = getLineNum(content, match.index);
-      reportOnce('HIGH', 'xss-react', line, `dangerouslySetInnerHTML in ${rel}:${line}`, 'Raw HTML injection — XSS risk if data comes from user input', 'Use DOMPurify to sanitize:\n  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(data) }}');
+      const signal = classifyCodeSink('html', statementAround(content, match.index));
+      if (!signal) continue;
+      reportOnce(signal, 'xss-react', line, 'React raw HTML sink without an observed sanitizer', 'Use DOMPurify to sanitize:\n  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(data) }}');
     }
 
-    // XSS — v-html
+    // XSS - v-html
     const vHtml = /v-html\s*=\s*["']([^"']+)["']/g;
     while ((match = vHtml.exec(content)) !== null) {
       if (isInComment(content, match.index, rel)) continue;
       const line = getLineNum(content, match.index);
-      reportOnce('HIGH', 'xss-vue', line, `v-html in ${rel}:${line}`, `Variable: ${match[1]}\nv-html injects raw HTML — XSS risk if data comes from user input`, 'Use {{ }} for text content, or sanitize:\n  v-html="DOMPurify.sanitize(data)"');
+      const signal = classifyCodeSink('html', statementAround(content, match.index));
+      if (!signal) continue;
+      reportOnce(signal, 'xss-vue', line, `Variable: ${match[1]}\nVue raw HTML sink without an observed sanitizer`, 'Use {{ }} for text content, or sanitize the value before binding it.');
     }
 
     // innerHTML
@@ -86,7 +114,9 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
     while ((match = innerHtml.exec(content)) !== null) {
       if (isInComment(content, match.index, rel)) continue;
       const line = getLineNum(content, match.index);
-      reportOnce('HIGH', 'xss-dom', line, `innerHTML in ${rel}:${line}`, 'Direct DOM manipulation via innerHTML — XSS risk', 'Use textContent instead of innerHTML, or sanitize the HTML');
+      const signal = classifyCodeSink('html', statementAround(content, match.index));
+      if (!signal) continue;
+      reportOnce(signal, 'xss-dom', line, 'DOM raw HTML sink without an observed sanitizer', 'Use textContent instead of innerHTML, or sanitize the HTML');
     }
 
     // eval / new Function
@@ -94,7 +124,9 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
     while ((match = evalPattern.exec(content)) !== null) {
       if (isInComment(content, match.index, rel)) continue;
       const line = getLineNum(content, match.index);
-      reportOnce('HIGH', 'eval', line, `eval() or new Function() in ${rel}:${line}`, 'eval/Function executes arbitrary code — injection vector', 'Refactor to avoid eval(). Use JSON.parse() for data, named functions for logic.');
+      const signal = classifyCodeSink('eval', statementAround(content, match.index));
+      if (!signal) continue;
+      reportOnce(signal, 'eval', line, 'eval/Function executes code in the current process', 'Refactor to avoid eval(). Use JSON.parse() for data and named functions for logic.');
     }
 
     // Command Injection
@@ -102,15 +134,19 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
     while ((match = cmdInjection.exec(content)) !== null) {
       if (isInComment(content, match.index, rel)) continue;
       const line = getLineNum(content, match.index);
-      reportOnce('CRITICAL', 'cmd-injection', line, `Command injection in ${rel}:${line}`, 'User input potentially injected into shell command', 'Use execFile() with separate arguments instead of exec() with concatenation');
+      const signal = classifyCodeSink('command', statementAround(content, match.index));
+      if (!signal) continue;
+      reportOnce(signal, 'cmd-injection', line, 'A process command is constructed dynamically', 'Use execFile() with a fixed executable and separate validated arguments.');
     }
 
     // Open Redirect
-    const openRedirect = /(?:redirect|location\.href|window\.location)\s*=\s*(?:req\.query|req\.params|req\.body|searchParams|params)/g;
+    const openRedirect = /(?:\b(?:res|reply|response)\.redirect\s*\(|\b(?:window\.)?location(?:\.href)?\s*=)[^;\n]+/g;
     while ((match = openRedirect.exec(content)) !== null) {
       if (isInComment(content, match.index, rel)) continue;
       const line = getLineNum(content, match.index);
-      reportOnce('HIGH', 'open-redirect', line, `Open redirect in ${rel}:${line}`, 'Redirect based on user parameter without validation', 'Validate redirect URL:\n  const url = new URL(redirect, baseUrl);\n  if (url.origin !== baseUrl) throw new Error(\'Invalid redirect\');');
+      const signal = classifyCodeSink('redirect', statementAround(content, match.index));
+      if (!signal) continue;
+      reportOnce(signal, 'open-redirect', line, 'Redirect target comes directly from request-controlled data', 'Parse the URL and enforce an explicit same-origin or destination allowlist.');
     }
 
     // Weak crypto
@@ -118,7 +154,8 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
     while ((match = weakCrypto.exec(content)) !== null) {
       if (isInComment(content, match.index, rel)) continue;
       const line = getLineNum(content, match.index);
-      reportOnce('MEDIUM', 'weak-crypto', line, `Weak hash algorithm in ${rel}:${line}`, 'MD5/SHA1 are not considered secure for hashing sensitive data', 'Use SHA-256 or bcrypt/argon2 for passwords');
+      const signal = classifyCodeSink('weak-hash', statementAround(content, match.index));
+      reportOnce(signal, 'weak-crypto', line, 'MD5/SHA1 usage requires context-specific review', 'Use SHA-256 for integrity or Argon2/scrypt for passwords.');
     }
 
     // ReDoS
@@ -126,7 +163,13 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
     while ((match = regexPattern.exec(content)) !== null) {
       if (isInComment(content, match.index, rel)) continue;
       const line = getLineNum(content, match.index);
-      reportOnce('HIGH', 'redos', line, `Potential ReDoS in ${rel}:${line}`, 'RegExp built from user input — denial of service risk', 'Never build RegExp from user input. Use escape-string-regexp library.');
+      reportOnce(
+        { severity: 'HIGH', confidence: 'high', classification: 'probable', title: 'Request data used to construct a regular expression' },
+        'redos',
+        line,
+        'A RegExp pattern is built directly from request-controlled data',
+        'Escape request data before constructing a RegExp and cap input length.',
+      );
     }
   }
 }

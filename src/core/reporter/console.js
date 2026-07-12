@@ -1,11 +1,12 @@
 // ──────────────────────────────────────────────
-// VICE — Console Reporter
+// VICE - Console Reporter
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
 import chalk from 'chalk';
 import { getFindings } from '../findings.js';
 import { calculateScore, severityColor } from '../score.js';
+import { ENGINE_VERSION } from '../version.js';
 
 export function printReport(title = 'Security Audit Report', options = {}) {
   const allFindings = getFindings();
@@ -18,7 +19,7 @@ export function printReport(title = 'Security Audit Report', options = {}) {
 
   console.log('\n');
   console.log(chalk.bold('━'.repeat(60)));
-  console.log(chalk.hex('#995ff6').bold('  VICE') + chalk.gray(` — ${title}`));
+  console.log(chalk.hex('#995ff6').bold('  VICE') + chalk.gray(` - ${title}`));
   console.log(chalk.gray('  Webba Creative Technologies'));
   console.log(chalk.bold('━'.repeat(60)));
   console.log('');
@@ -65,7 +66,7 @@ export function printReport(title = 'Security Audit Report', options = {}) {
   }
 
   console.log('\n' + chalk.bold('━'.repeat(60)));
-  console.log(`  Score: ${color(` ${grade} `)} (${score}/100) — Total: ${findings.length} finding(s)`);
-  console.log(chalk.gray('  VICE v3.0 — Webba Creative Technologies (c) 2026'));
+  console.log(`  Score: ${color(` ${grade} `)} (${score}/100) - Total: ${findings.length} finding(s)`);
+  console.log(chalk.gray(`  VICE v${ENGINE_VERSION} - Webba Creative Technologies (c) 2026`));
   console.log(chalk.bold('━'.repeat(60)) + '\n');
 }

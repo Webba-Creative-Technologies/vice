@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE — Project config loader (vice.config.js)
+// VICE - Project config loader (vice.config.js)
 // Optional file at project root for custom severity overrides,
 // finding transforms, and disabled modules.
 // Webba Creative Technologies (c) 2026

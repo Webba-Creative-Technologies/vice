@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE — Safe Fetch Utility
+// VICE - Safe Fetch Utility
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 

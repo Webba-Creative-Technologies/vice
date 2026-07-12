@@ -1,12 +1,12 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — Secrets in Source Code
+// VICE LOCAL - Secrets in Source Code
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
 import fs from 'fs';
 import path from 'path';
 import { addFinding } from '../core/findings.js';
-import { SECRET_PATTERNS } from '../utils/patterns.js';
+import { isPlaceholderSecret, SECRET_PATTERNS } from '../utils/patterns.js';
 import { isInComment, isMarkdownFile } from '../utils/comments.js';
 
 const BINARY_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.mp3', '.zip', '.gz', '.tar', '.pdf', '.lock']);
@@ -50,11 +50,15 @@ export async function auditSecrets(projectPath, spinner, isIgnored = () => false
     if (isIgnored(relativePath)) continue;
 
     for (const pattern of SECRET_PATTERNS) {
-      const matches = content.match(pattern.regex);
-      if (!matches) continue;
+      pattern.regex.lastIndex = 0;
+      let matchResult;
 
-      for (const match of matches) {
-        if (/your_|example|placeholder|xxx|yyy|zzz|changeme|replace_|INSERT_|TODO|FIXME|sk_test_|pk_test_/i.test(match)) continue;
+      while ((matchResult = pattern.regex.exec(content)) !== null) {
+        const match = matchResult[0];
+        const matchIndex = matchResult.index;
+        if (match.length === 0) pattern.regex.lastIndex++;
+        if (pattern.validate && !pattern.validate(match)) continue;
+        if (isPlaceholderSecret(match)) continue;
         if (/Bearer\s+(xxx|token|your|example|test)/i.test(match)) continue;
 
         // Filter out environment variable references (not actual secrets)
@@ -64,31 +68,24 @@ export async function auditSecrets(projectPath, spinner, isIgnored = () => false
         if (isMarkdownFile(relativePath) && (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret' || pattern.name === 'Bearer Token')) continue;
 
         // Locate the match in source and skip if inside a comment
-        const matchIndex = content.indexOf(match);
-        if (matchIndex !== -1) {
-          if (isInComment(content, matchIndex, relativePath)) continue;
+        if (isInComment(content, matchIndex, relativePath)) continue;
 
-          // Generic patterns: skip if the line references an env var or config getter
-          if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
-            const lineStart = content.lastIndexOf('\n', matchIndex) + 1;
-            const lineEnd = content.indexOf('\n', matchIndex);
-            const lineContent = content.substring(lineStart, lineEnd === -1 ? content.length : lineEnd);
-            if (/process\.env|import\.meta\.env|os\.environ|getenv|ENV\[|System\.getenv|config\(|Config\./i.test(lineContent)) continue;
-          }
+        // Generic patterns: skip if the line references an env var or config getter
+        if (pattern.name === 'Generic API Key' || pattern.name === 'Generic Secret') {
+          const lineStart = content.lastIndexOf('\n', matchIndex) + 1;
+          const lineEnd = content.indexOf('\n', matchIndex);
+          const lineContent = content.substring(lineStart, lineEnd === -1 ? content.length : lineEnd);
+          if (/process\.env|import\.meta\.env|os\.environ|getenv|ENV\[|System\.getenv|config\(|Config\./i.test(lineContent)) continue;
         }
 
         if (seenValues.has(match)) continue;
         seenValues.add(match);
 
-        const lines = content.split('\n');
-        let lineNum = 0;
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes(match.substring(0, 30))) { lineNum = i + 1; break; }
-        }
+        const lineNum = content.substring(0, matchIndex).split('\n').length;
 
         let sev = 'HIGH';
-        if (pattern.name.includes('Private') || pattern.name === 'Stripe Secret Key' || pattern.name === 'AWS Secret Key') sev = 'CRITICAL';
-        else if (pattern.name.includes('Publishable') || pattern.name === 'Supabase URL' || pattern.name === 'Firebase API Key') sev = 'INFO';
+        if (pattern.name.includes('Private') || pattern.name === 'Stripe Secret Key' || pattern.name === 'AWS Secret Key' || pattern.name === 'Database Credential URL') sev = 'CRITICAL';
+        else if (pattern.name.includes('Publishable') || pattern.name === 'Firebase API Key') sev = 'INFO';
         else if (pattern.name === 'Supabase Service Role') sev = 'CRITICAL';
 
         const isEnvFile = /\.env/.test(relativePath);

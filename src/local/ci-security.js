@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — CI/CD Workflow Security
+// VICE LOCAL - CI/CD Workflow Security
 // Audits .github/workflows/*.yml for common misconfigurations:
 // unpinned actions, dangerous pull_request_target patterns, overly broad
 // permissions, and secrets being echoed to logs.
@@ -16,20 +16,19 @@ function getLine(content, position) {
 
 export async function auditCiSecurity(projectPath, spinner) {
   const workflowsDir = path.join(projectPath, '.github', 'workflows');
-  if (!fs.existsSync(workflowsDir)) {
+  let files = [];
+  if (fs.existsSync(workflowsDir)) {
+    spinner.text = 'Auditing GitHub Actions workflows...';
+    files = (await fs.promises.readdir(workflowsDir)).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+    if (files.length === 0) {
+      addFinding('INFO', 'CI/CD Security', 'Workflows directory is empty', '', '');
+    }
+  } else {
     addFinding('INFO', 'CI/CD Security', 'No GitHub Actions workflows found', '', '');
-    return;
-  }
-
-  spinner.text = 'Auditing GitHub Actions workflows...';
-
-  const files = (await fs.promises.readdir(workflowsDir)).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
-  if (files.length === 0) {
-    addFinding('INFO', 'CI/CD Security', 'Workflows directory is empty', '', '');
-    return;
   }
 
   let totalIssues = 0;
+  let scannedConfigs = files.length;
 
   for (const file of files) {
     const filePath = path.join(workflowsDir, file);
@@ -143,6 +142,7 @@ export async function auditCiSecurity(projectPath, spinner) {
     let content;
     try { content = await fs.promises.readFile(gitlabCi, 'utf-8'); } catch { content = null; }
     if (content) {
+      scannedConfigs++;
       const rel = '.gitlab-ci.yml';
 
       // image: foo:latest (or no tag = latest)
@@ -195,6 +195,7 @@ export async function auditCiSecurity(projectPath, spinner) {
     let content;
     try { content = await fs.promises.readFile(circleCi, 'utf-8'); } catch { content = null; }
     if (content) {
+      scannedConfigs++;
       const rel = '.circleci/config.yml';
 
       // Orbs referenced by mutable tag (volatile, dev:*, or no version)
@@ -226,8 +227,8 @@ export async function auditCiSecurity(projectPath, spinner) {
   }
 
   if (totalIssues === 0) {
-    addFinding('INFO', 'CI/CD Security', `${files.length} workflow(s) scanned, no issues`, '', '');
+    addFinding('INFO', 'CI/CD Security', `${scannedConfigs} CI configuration(s) scanned, no issues`, '', '');
   } else {
-    addFinding('INFO', 'CI/CD Security', `${files.length} workflow(s) scanned, ${totalIssues} issue(s) found`, '', '');
+    addFinding('INFO', 'CI/CD Security', `${scannedConfigs} CI configuration(s) scanned, ${totalIssues} issue(s) found`, '', '');
   }
 }

@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE — Baseline file management
+// VICE - Baseline file management
 // Suppress pre-existing findings on adoption so only new issues block CI.
 // File: .vice-baseline.json at project root.
 // Webba Creative Technologies (c) 2026

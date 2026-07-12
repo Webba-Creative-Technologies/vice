@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE — .viceignore Parser
+// VICE - .viceignore Parser
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 

@@ -1,9 +1,9 @@
 // ──────────────────────────────────────────────
-// VICE — SARIF v2.1.0 Reporter
+// VICE - SARIF v2.1.0 Reporter
 // Webba Creative Technologies (c) 2026
 //
 // Produces a SARIF v2.1.0 document suitable for upload to
-// GitHub code scanning via github/codeql-action/upload-sarif@v3.
+// GitHub code scanning via github/codeql-action/upload-sarif@v4.
 // ──────────────────────────────────────────────
 
 const SARIF_SCHEMA = 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json';
@@ -40,7 +40,11 @@ function isInfoSeverity(severity) {
 
 function normalizePath(p) {
   if (!p) return '.';
-  return String(p).replace(/\\/g, '/');
+  const normalized = String(p).trim().replace(/\\/g, '/');
+  if (!normalized || /[\r\n\0]/.test(normalized)) return '.';
+  if (/^[a-z][a-z0-9+.-]*:/i.test(normalized)) return '.';
+  if (normalized.startsWith('/') || normalized.split('/').includes('..')) return '.';
+  return encodeURI(normalized);
 }
 
 // ── Rule ID derivation ────────────────────────────────────────

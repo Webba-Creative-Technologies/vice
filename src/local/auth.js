@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — Auth & Middleware Audit
+// VICE LOCAL - Auth & Middleware Audit
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
@@ -61,7 +61,7 @@ export async function auditAuth(projectPath, spinner, isIgnored = () => false) {
 
     if (/session\s*\(\s*\{/i.test(content)) {
       if (/secure\s*:\s*false/i.test(content)) {
-        addFinding('HIGH', 'Auth & Middleware', `Insecure session cookie in ${rel}`, 'secure: false — session cookie sent over plain HTTP', 'Set secure: true in production');
+        addFinding('HIGH', 'Auth & Middleware', `Insecure session cookie in ${rel}`, 'secure: false - session cookie sent over plain HTTP', 'Set secure: true in production');
       }
       if (!/httpOnly/i.test(content)) {
         addFinding('HIGH', 'Auth & Middleware', `Session without httpOnly in ${rel}`, 'Session cookie accessible via JavaScript (XSS risk)', 'Add httpOnly: true to session config');

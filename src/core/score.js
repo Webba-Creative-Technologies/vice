@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE — Score Calculator
+// VICE - Score Calculator
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
@@ -35,20 +35,44 @@ export function calculateScore(findingsData, options = {}) {
   const minRank = CONFIDENCE_RANK[minConfidence] || 1;
   const minSevRank = options.minSeverity ? (SEVERITY_RANK[options.minSeverity.toUpperCase()] || 1) : 1;
 
-  let penalty = 0;
-  const counts = new Map();
+  const penaltiesByRule = new Map();
+  const excluded = { baselined: 0, confidence: 0, severity: 0, informational: 0 };
 
   for (const f of data) {
-    if (f.baselined) continue;
+    if (f.baselined) {
+      excluded.baselined++;
+      continue;
+    }
     const rank = CONFIDENCE_RANK[f.confidence || 'medium'] || 2;
-    if (rank < minRank) continue;
-    if ((SEVERITY_RANK[f.severity] || 0) < minSevRank) continue;
+    if (rank < minRank) {
+      excluded.confidence++;
+      continue;
+    }
+    if ((SEVERITY_RANK[f.severity] || 0) < minSevRank) {
+      excluded.severity++;
+      continue;
+    }
+    const weight = WEIGHT_MAP[f.severity] || 0;
+    if (weight === 0) {
+      excluded.informational++;
+      continue;
+    }
     const key = groupKey(f);
-    const count = counts.get(key) || 0;
-    if (count >= MAX_PENALTIES_PER_RULE) continue;
-    counts.set(key, count + 1);
-    penalty += WEIGHT_MAP[f.severity] || 0;
+    const weights = penaltiesByRule.get(key) || [];
+    weights.push(weight);
+    penaltiesByRule.set(key, weights);
   }
+
+  const breakdown = [...penaltiesByRule.entries()].map(([ruleId, weights]) => {
+    const strongest = [...weights].sort((left, right) => right - left).slice(0, MAX_PENALTIES_PER_RULE);
+    return {
+      rule_id: ruleId,
+      penalty: strongest.reduce((sum, weight) => sum + weight, 0),
+      counted_findings: strongest.length,
+      observed_findings: weights.length,
+    };
+  }).sort((left, right) => right.penalty - left.penalty || left.rule_id.localeCompare(right.rule_id));
+  const penalty = breakdown.reduce((total, rule) => total + rule.penalty, 0);
 
   const rawScore = Math.max(0, 100 - penalty);
   let grade, color;
@@ -58,7 +82,15 @@ export function calculateScore(findingsData, options = {}) {
   else if (rawScore >= 40) { grade = 'D'; color = chalk.red.bold; }
   else if (rawScore >= 20) { grade = 'E'; color = chalk.bgRed.white.bold; }
   else { grade = 'F'; color = chalk.bgRed.white.bold; }
-  return { score: rawScore, grade, color };
+  return {
+    score: rawScore,
+    grade,
+    color,
+    total_penalty: penalty,
+    breakdown,
+    excluded,
+    min_confidence: minConfidence,
+  };
 }
 
 const SEV_COLOR_MAP = {

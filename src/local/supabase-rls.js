@@ -1,11 +1,12 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — Supabase RLS Audit in Migrations
+// VICE LOCAL - Supabase RLS Audit in Migrations
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
 import fs from 'fs';
 import path from 'path';
 import { addFinding } from '../core/findings.js';
+import { analyzeRlsSql } from '../core/detectors/rls-sql.js';
 
 export async function auditSupabaseRls(projectPath, spinner) {
   spinner.text = 'Looking for Supabase migrations...';
@@ -39,6 +40,7 @@ export async function auditSupabaseRls(projectPath, spinner) {
     }
   }
   await findSql(migrationDir);
+  sqlFiles.sort((left, right) => left.localeCompare(right));
 
   if (sqlFiles.length === 0) {
     addFinding('INFO', 'Supabase RLS', 'No SQL files found in migrations', '', '');
@@ -48,8 +50,10 @@ export async function auditSupabaseRls(projectPath, spinner) {
   spinner.text = `Analyzing ${sqlFiles.length} SQL files...`;
 
   const tablesCreated = new Map();
-  const tablesWithRls = new Set();
-  const tablesWithPolicies = new Set();
+  const rlsState = new Map();
+  const policiesByTable = new Map();
+  const activeGrants = new Map();
+  const functions = new Map();
 
   for (const filePath of sqlFiles) {
     const content = await fs.promises.readFile(filePath, 'utf-8');
@@ -64,39 +68,75 @@ export async function auditSupabaseRls(projectPath, spinner) {
       }
     }
 
-    const rlsRegex = /ALTER\s+TABLE\s+(?:public\.)?["']?(\w+)["']?\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY/gi;
-    while ((match = rlsRegex.exec(content)) !== null) tablesWithRls.add(match[1].toLowerCase());
-
-    const policyRegex = /CREATE\s+POLICY\s+.*?\s+ON\s+(?:public\.)?["']?(\w+)["']?/gi;
-    while ((match = policyRegex.exec(content)) !== null) tablesWithPolicies.add(match[1].toLowerCase());
+    const rlsAnalysis = analyzeRlsSql(content);
+    for (const event of rlsAnalysis.tableEvents.sort((left, right) => left.index - right.index)) {
+      rlsState.set(event.table, event.enabled);
+    }
+    for (const event of rlsAnalysis.policyEvents.sort((left, right) => left.index - right.index)) {
+      const policies = policiesByTable.get(event.table) || new Map();
+      if (event.action === 'create') policies.set(event.name, { ...event, file: rel });
+      else policies.delete(event.name);
+      policiesByTable.set(event.table, policies);
+    }
+    for (const event of rlsAnalysis.grantEvents.sort((left, right) => left.index - right.index)) {
+      if (event.action === 'grant') {
+        const key = `${event.table}:${[...event.roles].sort().join(',')}:${[...event.privileges].sort().join(',')}`;
+        activeGrants.set(key, { ...event, file: rel });
+      } else {
+        for (const [key, grant] of activeGrants) {
+          const sameTable = grant.table === event.table;
+          const sharedRole = grant.roles.some(role => event.roles.includes(role));
+          const sharedPrivilege = event.privileges.includes('ALL') || grant.privileges.some(privilege => event.privileges.includes(privilege));
+          if (sameTable && sharedRole && sharedPrivilege) activeGrants.delete(key);
+        }
+      }
+    }
+    for (const event of rlsAnalysis.functionEvents.sort((left, right) => left.index - right.index)) {
+      if (event.action === 'create') functions.set(event.name, { ...event, file: rel });
+      else functions.delete(event.name);
+    }
+    for (const signal of rlsAnalysis.signals) {
+      addFinding(signal.severity, 'Supabase RLS', signal.title, `${rel}\n${signal.detail}`, signal.recommendation);
+    }
 
     if (/EXECUTE\s+['"].*?\|\|.*?['"]|format\s*\(.*?%s/gi.test(content)) {
-      addFinding('HIGH', 'Supabase RLS', `Unsafe dynamic SQL in ${rel}`, 'String concatenation or format() used in SQL query — injection risk', 'Use parameters ($1, $2) instead of string concatenation');
+      addFinding('HIGH', 'Supabase RLS', `Unsafe dynamic SQL in ${rel}`, 'String concatenation or format() used in SQL query - injection risk', 'Use parameters ($1, $2) instead of string concatenation');
     }
 
-    const grantRegex = /GRANT\s+ALL\s+(?:PRIVILEGES\s+)?ON\s+.*?\s+TO\s+(anon|authenticated|public)/gi;
-    while ((match = grantRegex.exec(content)) !== null) {
-      addFinding('HIGH', 'Supabase RLS', `GRANT ALL to public role in ${rel}`, `GRANT ALL TO ${match[1]} — grants all permissions`, `Restrict grants: GRANT SELECT, INSERT ON table TO ${match[1]}`);
-    }
+  }
 
-    const secDefRegex = /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(\w+).*?SECURITY\s+DEFINER/gis;
-    while ((match = secDefRegex.exec(content)) !== null) {
-      if (!/auth\.uid\(\)|auth\.role\(\)|current_user/i.test(match[0])) {
-        addFinding('HIGH', 'Supabase RLS', `SECURITY DEFINER function without auth check: ${match[1]}`, `${rel}\nFunction ${match[1]} runs with creator privileges but does not verify caller identity`, `Add check: IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;`);
-      }
+  for (const [table, enabled] of rlsState) {
+    if (!enabled && !tablesCreated.has(table)) {
+      addFinding('CRITICAL', 'Supabase RLS', `RLS explicitly disabled on "${table}"`, `The final migration state contains DISABLE ROW LEVEL SECURITY for ${table}.`, `Enable RLS on ${table} and add restrictive policies.`);
+    }
+  }
+
+  for (const policies of policiesByTable.values()) {
+    for (const policy of policies.values()) {
+      if (policy.signal) addFinding(policy.signal.severity, 'Supabase RLS', policy.signal.title, `${policy.file}\n${policy.signal.detail}`, policy.signal.recommendation);
+    }
+  }
+
+  for (const grant of activeGrants.values()) {
+    if (grant.signal) addFinding(grant.signal.severity, 'Supabase RLS', grant.signal.title, `${grant.file}\n${grant.signal.detail}`, grant.signal.recommendation);
+  }
+
+  for (const definition of functions.values()) {
+    for (const signal of definition.signals) {
+      addFinding(signal.severity, 'Supabase RLS', signal.title, `${definition.file}\n${signal.detail}`, signal.recommendation);
     }
   }
 
   for (const [table, file] of tablesCreated) {
-    if (!tablesWithRls.has(table)) {
+    if (rlsState.get(table) !== true) {
       addFinding('CRITICAL', 'Supabase RLS', `Table "${table}" created without RLS`, `Defined in ${file}\nNo ALTER TABLE ... ENABLE ROW LEVEL SECURITY found`, `Add after table creation:\n  ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;\n  CREATE POLICY "${table}_select" ON ${table} FOR SELECT USING (auth.uid() = user_id);`);
-    } else if (!tablesWithPolicies.has(table)) {
+    } else if ((policiesByTable.get(table)?.size || 0) === 0) {
       addFinding('HIGH', 'Supabase RLS', `Table "${table}" has RLS enabled but no policies`, 'RLS is on but without policies, NO data is accessible (even for authorized users)', `Add policies:\n  CREATE POLICY "${table}_read" ON ${table} FOR SELECT USING (auth.uid() = user_id);`);
     }
   }
 
   if (tablesCreated.size > 0) {
-    const withRls = [...tablesCreated.keys()].filter(t => tablesWithRls.has(t)).length;
+    const withRls = [...tablesCreated.keys()].filter(t => rlsState.get(t) === true).length;
     addFinding('INFO', 'Supabase RLS', `${tablesCreated.size} tables, ${withRls} with RLS`, `Tables: ${[...tablesCreated.keys()].join(', ')}`, '');
   }
 }

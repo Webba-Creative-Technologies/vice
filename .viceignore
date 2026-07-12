@@ -8,3 +8,5 @@ src/local/code-vulnerabilities.js
 src/local/auth.js
 src/local/secrets.js
 src/utils/patterns.js
+src/core/detectors/
+test/

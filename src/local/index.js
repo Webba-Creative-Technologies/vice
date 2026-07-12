@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — White-Box Audit Engine
+// VICE LOCAL - White-Box Audit Engine
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 

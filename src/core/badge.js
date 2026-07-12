@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE — Badge Generator (shields.io endpoint format)
+// VICE - Badge Generator (shields.io endpoint format)
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
@@ -19,7 +19,7 @@ export function generateBadge(score, grade) {
   return {
     schemaVersion: 1,
     label: 'vice security',
-    message: `${grade} — ${score}/100`,
+    message: `${grade} - ${score}/100`,
     color: GRADE_COLORS[grade] || 'lightgrey',
   };
 }

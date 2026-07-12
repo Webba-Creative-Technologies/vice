@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE LOCAL — Container & IaC Audit
+// VICE LOCAL - Container & IaC Audit
 // Reviews Dockerfile and docker-compose for common misconfigurations:
 // running as root, secrets baked into images, untagged base images,
 // services exposed on 0.0.0.0, and privileged containers.
@@ -73,13 +73,13 @@ function auditDockerfile(content, rel) {
   }
 
   // Hardcoded secrets in ENV
-  const envSecretRegex = /^ENV\s+\w*(?:SECRET|PASSWORD|API[_-]?KEY|TOKEN|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)\w*[\s=]+\S+/gim;
+  const envSecretRegex = /^ENV\s+(\w*(?:SECRET|PASSWORD|API[_-]?KEY|TOKEN|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)\w*)[\s=]+\S+/gim;
   while ((m = envSecretRegex.exec(content)) !== null) {
     const line = getLine(content, m.index);
     // Skip if value is a placeholder
     if (/your_|example|placeholder|xxx|changeme|\$\{/i.test(m[0])) continue;
     addFinding('CRITICAL', 'Container', `Potential secret in ENV in ${rel}:${line}`,
-      `${m[0]}\nSecrets baked into image layers are accessible to anyone with the image. They cannot be revoked from existing pulls.`,
+      `ENV ${m[1]}=<redacted>\nSecrets baked into image layers are accessible to anyone with the image. They cannot be revoked from existing pulls.`,
       `Pass secrets at runtime instead: docker run -e SECRET=val (or use Docker/Compose secrets).`,
       { file: rel, line }, 'high');
     issues++;
@@ -103,16 +103,65 @@ function auditCompose(content, rel) {
     issues++;
   }
 
-  // Ports bound to 0.0.0.0 (or no host binding, which defaults to 0.0.0.0)
-  const portRegex = /^[ \t]*-\s*["']?0\.0\.0\.0:(\d+):/gm;
+  const dockerSocketRegex = /^[^#\n]*\/var\/run\/docker\.sock(?:\s*:\s*\/var\/run\/docker\.sock)?[^\n]*$/gim;
+  while ((m = dockerSocketRegex.exec(content)) !== null) {
+    const line = getLine(content, m.index);
+    addFinding('CRITICAL', 'Container', `Docker socket mounted in ${rel}:${line}`,
+      'The container can control the Docker daemon and normally obtain root-level access to the host.',
+      'Remove the socket mount. Use a restricted proxy exposing only the required Docker API operations.',
+      { file: rel, line }, 'high');
+    issues++;
+  }
+
+  const hostNamespaceChecks = [
+    { regex: /^[ \t]+network_mode:\s*["']?host["']?\s*(?:#.*)?$/gim, label: 'host network namespace' },
+    { regex: /^[ \t]+pid:\s*["']?host["']?\s*(?:#.*)?$/gim, label: 'host PID namespace' },
+    { regex: /^[ \t]+ipc:\s*["']?host["']?\s*(?:#.*)?$/gim, label: 'host IPC namespace' },
+  ];
+  for (const check of hostNamespaceChecks) {
+    while ((m = check.regex.exec(content)) !== null) {
+      const line = getLine(content, m.index);
+      addFinding('HIGH', 'Container', `${check.label} enabled in ${rel}:${line}`,
+        `The service shares the ${check.label.replace('host ', '')} with the host, weakening container isolation.`,
+        'Use the default isolated namespace and expose only explicitly required resources.',
+        { file: rel, line }, 'high');
+      issues++;
+    }
+  }
+
+  const allCapabilitiesRegex = /^[ \t]+cap_add:\s*(?:\[[^\]\n]*\bALL\b[^\]\n]*\]|\r?\n[ \t]+-\s*["']?ALL["']?\s*(?:#.*)?$)/gim;
+  while ((m = allCapabilitiesRegex.exec(content)) !== null) {
+    const line = getLine(content, m.index);
+    addFinding('HIGH', 'Container', `All Linux capabilities added in ${rel}:${line}`,
+      'cap_add: ALL removes most capability-based isolation from the container.',
+      'Remove cap_add: ALL and grant only the individual capability that is strictly required.',
+      { file: rel, line }, 'high');
+    issues++;
+  }
+
+  const unconfinedRegex = /^(?![ \t]*#)[^\n]*(?:seccomp|apparmor)\s*[:=]\s*unconfined[^\n]*$/gim;
+  while ((m = unconfinedRegex.exec(content)) !== null) {
+    const line = getLine(content, m.index);
+    addFinding('HIGH', 'Container', `Unconfined security profile in ${rel}:${line}`,
+      `${m[0].trim()} disables a kernel-level container confinement profile.`,
+      'Remove the unconfined option or provide a minimal custom seccomp or AppArmor profile.',
+      { file: rel, line }, 'high');
+    issues++;
+  }
+
+  // Explicit 0.0.0.0 and HOST:CONTAINER short syntax both bind publicly.
+  // Localhost bindings do not match this expression.
+  const portRegex = /^[ \t]*-\s*["']?(?:0\.0\.0\.0:)?(\d+):(\d+)(?:\/(?:tcp|udp))?["']?\s*(?:#.*)?$/gm;
   while ((m = portRegex.exec(content)) !== null) {
     const port = parseInt(m[1]);
+    const containerPort = parseInt(m[2]);
     const line = getLine(content, m.index);
     const dbPorts = [3306, 5432, 27017, 6379, 9200, 11211, 5984];
-    const sev = dbPorts.includes(port) ? 'HIGH' : 'MEDIUM';
+    const isDatabase = dbPorts.includes(port) || dbPorts.includes(containerPort);
+    const sev = isDatabase ? 'HIGH' : 'MEDIUM';
     addFinding(sev, 'Container', `Service exposed on 0.0.0.0:${port} in ${rel}:${line}`,
-      `Service is reachable from any network interface. ${dbPorts.includes(port) ? 'Database services should only be reachable on localhost or internal networks.' : 'Consider whether external exposure is intended.'}`,
-      `Bind to localhost: "127.0.0.1:${port}:${port}" - or remove the host binding to keep it on the internal Compose network only.`,
+      `Host port ${port} publishes container port ${containerPort} on every network interface. ${isDatabase ? 'Database services should only be reachable on localhost or internal networks.' : 'Consider whether external exposure is intended.'}`,
+      `Bind to localhost: "127.0.0.1:${port}:${containerPort}" - or remove the host binding to keep it on the internal Compose network only.`,
       { file: rel, line }, 'medium');
     issues++;
   }
@@ -125,7 +174,7 @@ function auditCompose(content, rel) {
     if (/your_|example|placeholder|xxx|changeme|\$\{/i.test(value)) continue;
     const line = getLine(content, m.index);
     addFinding('CRITICAL', 'Container', `Potential secret in environment in ${rel}:${line}`,
-      `${m[0].trim()}\nCommitted secrets in compose files are visible to anyone with repo access and history.`,
+      `${m[1]}=<redacted>\nCommitted secrets in compose files are visible to anyone with repo access and history.`,
       `Use a .env file (in .gitignore) referenced via env_file: or use Docker secrets.`,
       { file: rel, line }, 'high');
     issues++;

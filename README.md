@@ -19,7 +19,7 @@
   <a href="#github-action"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Webba-Creative-Technologies/vice/main/.github/vice-badge.json" alt="VICE Security"></a>
   <a href="https://github.com/Webba-Creative-Technologies/vice/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node">
-  <img src="https://img.shields.io/badge/modules-22-995ff6" alt="Modules">
+  <img src="https://img.shields.io/badge/modules-26-995ff6" alt="Modules">
 </p>
 
 <br>
@@ -28,7 +28,7 @@
 
 VICE is a security auditing CLI tool that finds vulnerabilities in your web applications. It has two modes:
 
-**Remote scan** gives it a URL. It crawls your site with a real browser, extracts secrets from JS bundles, tests your login for brute force and SQL injection, scans your VPS ports, checks your Supabase RLS, and more. Like an attacker would, but on your own systems.
+**Remote scan** gives it a URL. It crawls your site with a real browser, inspects public client resources, qualifies exposed services, checks Supabase access controls, and runs bounded read-only security probes within the selected target scope.
 
 **Local audit** points it at your project directory. It reads your source code, checks your `.env` files, runs npm audit, analyzes your Supabase migrations for missing RLS, finds SQL injections and XSS in your code, and tells you exactly what to fix.
 
@@ -78,7 +78,7 @@ jobs:
   vice:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Webba-Creative-Technologies/vice@v3
 ```
 
@@ -163,7 +163,7 @@ The action version always matches the CLI version, so pinning gives you both at 
 
 ## Remote scan (black-box)
 
-Give VICE a URL and it audits your site from the outside using a headless browser. It captures every JS file, every network request, and every cookie, then runs 15 security modules against them.
+Give VICE a URL and it audits your site from the outside using a headless browser. It inspects discovered public resources and runs 16 security modules with shared scope, request, DNS and time budgets.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Webba-Creative-Technologies/vice/main/assets/modules.png" alt="VICE modules" width="100%">
@@ -179,16 +179,17 @@ Give VICE a URL and it audits your site from the outside using a headless browse
 | **Exposed Files** | `.env`, `.git/config`, `package.json`, `.DS_Store`, source maps, with SPA catch-all detection |
 | **HTTP Headers** | Missing CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy |
 | **Supabase Audit** | RLS policies on every table, read/write access with anon key, auth providers, admin endpoints |
-| **Auth Injection** | Signup abuse, direct injection into auth.users, service_role key detection (JWT payload decoded) |
-| **VPS Port Scan** | 20 common ports (SSH, databases, Redis, dev servers, admin panels), banner grabbing, reverse DNS |
-| **Attack Tests** | XSS reflected (6 payloads x 14 params), clickjacking, CORS misconfiguration, open redirect, path traversal, SSL/TLS, cookie security, CSP bypass, HTTP methods |
-| **Login Audit** | GET vs POST form, CSRF tokens, brute force (5 attempts), user enumeration, SQL injection (5 phases with UNION extraction), password reset security, external script injection demo |
+| **Auth Injection** | Public signup behavior, exposed privileged roles and service_role key detection through JWT classification |
+| **VPS Port Scan** | Common service ports qualified by protocol banner, access-control response and reverse DNS |
+| **Attack Tests** | Bounded read-only checks for reflected input, clickjacking, CORS, redirects, traversal signatures, TLS, cookies, CSP and HTTP methods |
+| **Login Audit** | Form methods, CSRF controls, observable rate limiting, enumeration signals and confirmed timing behavior without submitting state-changing forms |
 | **Stack Detection** | 40+ technologies fingerprinted across frameworks, servers, BaaS, analytics, build tools, UI libraries |
 | **Subdomain Scan** | DNS enumeration of 80+ common subdomains, HTTP/HTTPS check, dangerous subdomain detection |
 | **DNS & Email** | SPF, DKIM (12 selectors), DMARC policy analysis, dangling CNAME detection (subdomain takeover) |
-| **API Endpoints** | Discovery from JS bundles, auth testing, rate limiting, SQL injection, CORS per endpoint |
-| **Storage Buckets** | Supabase Storage bucket enumeration, file listing, upload testing, S3/GCS URL detection |
-| **WebSocket** | Realtime channel eavesdropping, Supabase Realtime, Socket.IO, unauthenticated message capture |
+| **API Endpoints** | First-party discovery, public-data classification, schema analysis, rate limiting, CORS and mutation-surface reporting without invoking writes |
+| **Storage Buckets** | Supabase Storage bucket discovery, bounded public listing and S3/GCS URL detection without uploads |
+| **WebSocket** | Bounded handshake and message classification for Realtime and Socket.IO, with credentials and message bodies removed from reports |
+| **WordPress** | Version, user-enumeration and cron exposure signals qualified by recognizable WordPress responses |
 
 Here's what it looks like running:
 
@@ -218,6 +219,9 @@ vice audit /path/to/project
 | **Auth & Middleware** | Rate limiting presence, CORS wildcards, CSRF protection, session config, JWT expiration, hardcoded passwords |
 | **Code Vulnerabilities** | SQL injection (template literals in queries), XSS (`v-html`, `dangerouslySetInnerHTML`, `innerHTML`), `eval()`, command injection, open redirects, weak crypto, ReDoS |
 | **Headers Config** | CSP and HSTS configuration in Nuxt, Next.js, Vercel, Netlify, Express configs |
+| **Git History** | Credential patterns in recent commits, with values redacted from findings and reports |
+| **Container & IaC** | Docker socket access, privileged containers, host namespaces, public ports and missing isolation controls |
+| **CI/CD Security** | Unpinned actions, dangerous workflow permissions, pull_request_target risks and expression injection |
 
 <br>
 
@@ -332,7 +336,8 @@ vice/
 │   └── utils/
 │       ├── fetch.js             # HTTP with timeout
 │       └── patterns.js          # Shared regex patterns
-├── scan.js                      # Remote scan engine (15 modules)
+├── scan.js                      # Remote scan engine (16 modules)
+├── test/                        # Engine and CLI regression suite
 ├── scans/                       # Saved reports
 └── package.json
 ```
@@ -370,7 +375,7 @@ import { auditYourModule } from './your-module.js';
 
 ### Adding a remote scan module
 
-Add your module function in `scan.js` and register it in the `main()` function with a spinner and the module selection menu.
+Add your module function in `scan.js`, register it in `runScan`, then expose it in the module selection menu.
 
 ### Contributing
 
@@ -379,6 +384,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. In short: fork, branch, P
 <br>
 
 ## Changelog
+
+### v3.3.0
+- Strict URL, DNS, redirect, browser and raw-socket scope enforcement
+- Per-scan isolation, cancellation, request budgets and bounded concurrency
+- Evidence-based API, GraphQL, WebSocket, TLS, Supabase and service classification
+- Stable rule IDs, fingerprints, confidence, coverage and versioned scoring
+- Secret redaction across findings, JSON, SARIF and escaped HTML reports
+- Non-destructive remote probes and reduced false positives
+- 244 engine, reporter and CLI regression tests
 
 ### v3.0
 - Two modes: remote scan (black-box) and local audit (white-box)

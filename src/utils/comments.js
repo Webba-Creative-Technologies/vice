@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// VICE — Comment-aware position helper
+// VICE - Comment-aware position helper
 // Tells you whether a given offset in a file is inside a comment.
 // Used by detection modules to skip patterns matched in commented-out code,
 // JSDoc blocks, HTML comments, and shell/YAML hash comments.

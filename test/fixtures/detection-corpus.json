@@ -1,0 +1,213 @@
+{
+  "positives": [
+    {
+      "name": "Stripe secret key",
+      "source": "const stripeSecret = \"sk_live_1234567890abcdefghijkl\";",
+      "expectedPattern": "Stripe Secret Key"
+    },
+    {
+      "name": "Stripe test secret key",
+      "source": "const stripeSecret = \"sk_test_1234567890abcdefghijkl\";",
+      "expectedPattern": "Stripe Secret Key"
+    },
+    {
+      "name": "AWS access key",
+      "source": "AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF",
+      "expectedPattern": "AWS Access Key"
+    },
+    {
+      "name": "GitHub token",
+      "source": "GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+      "expectedPattern": "GitHub Token"
+    },
+    {
+      "name": "PEM private key",
+      "source": "-----BEGIN PRIVATE KEY-----\nredacted\n-----END PRIVATE KEY-----",
+      "expectedPattern": "Private Key"
+    },
+    {
+      "name": "generic API key assignment",
+      "source": "api_key = \"0123456789abcdef0123456789abcdef\"",
+      "expectedPattern": "Generic API Key"
+    },
+    {
+      "name": "AWS temporary access key",
+      "source": "AWS_ACCESS_KEY_ID=ASIA1234567890ABCDEF",
+      "expectedPattern": "AWS Temporary Access Key"
+    },
+    {
+      "name": "GitHub fine-grained token",
+      "source": "GITHUB_TOKEN=github_pat_1234567890abcdefghijklmnopqrstuvwxyz_ABCD",
+      "expectedPattern": "GitHub Fine-grained Token"
+    },
+    {
+      "name": "GitLab token",
+      "source": "GITLAB_TOKEN=glpat-1234567890abcdefghijkl",
+      "expectedPattern": "GitLab Token"
+    },
+    {
+      "name": "npm token",
+      "source": "NPM_TOKEN=npm_1234567890abcdefghijklmnopqrstuvwxyz",
+      "expectedPattern": "npm Token"
+    },
+    {
+      "name": "PyPI token",
+      "source": "PYPI_TOKEN=pypi-AgEIcHlwaS5vcmc1234567890abcdefghijklmnopqrstuvwxyz_ABCD",
+      "expectedPattern": "PyPI Token"
+    },
+    {
+      "name": "Slack token",
+      "sourceParts": ["SLACK_TOKEN=xox", "b-1234567890-abcdefghijklmnop"],
+      "expectedPattern": "Slack Token"
+    },
+    {
+      "name": "SendGrid API key",
+      "source": "SENDGRID_API_KEY=SG.1234567890abcdef.1234567890abcdefghijklmnop",
+      "expectedPattern": "SendGrid API Key"
+    },
+    {
+      "name": "Twilio auth token",
+      "source": "TWILIO_AUTH_TOKEN=0123456789abcdef0123456789abcdef",
+      "expectedPattern": "Twilio Auth Token"
+    },
+    {
+      "name": "database credential URL",
+      "source": "DATABASE_URL=postgresql://admin:supersecret@db.example.com:5432/app",
+      "expectedPattern": "Database Credential URL"
+    },
+    {
+      "name": "OpenSSH private key",
+      "source": "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "expectedPattern": "Private Key"
+    },
+    {
+      "name": "Discord webhook credential",
+      "source": "https://discord.com/api/webhooks/123456789/abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789",
+      "expectedPattern": "Discord Webhook"
+    }
+  ],
+  "negatives": [
+    {
+      "name": "environment variable reference",
+      "source": "const apiKey = process.env.API_KEY;"
+    },
+    {
+      "name": "documentation without credential value",
+      "source": "Set your provider credentials through the deployment environment."
+    },
+    {
+      "name": "short development placeholder",
+      "source": "const secret = \"development\";"
+    }
+  ],
+  "codeSinks": [
+    {
+      "name": "request query interpolated into SQL",
+      "kind": "sql",
+      "source": "db.query(`SELECT * FROM users WHERE id = ${req.query.id}`)",
+      "severity": "CRITICAL",
+      "confidence": "high"
+    },
+    {
+      "name": "request body concatenated into SQL",
+      "kind": "sql",
+      "source": "db.query('SELECT * FROM users WHERE email = ' + req.body.email)",
+      "severity": "CRITICAL",
+      "confidence": "high"
+    },
+    {
+      "name": "allowlisted dynamic SQL identifier",
+      "kind": "sql",
+      "source": "db.query(`SELECT * FROM ${allowedTable}`)",
+      "severity": "MEDIUM",
+      "confidence": "low"
+    },
+    {
+      "name": "request HTML assigned to DOM",
+      "kind": "html",
+      "source": "output.innerHTML = req.body.preview",
+      "severity": "HIGH",
+      "confidence": "high"
+    },
+    {
+      "name": "unknown dynamic HTML",
+      "kind": "html",
+      "source": "output.innerHTML = renderedContent",
+      "severity": "LOW",
+      "confidence": "low"
+    },
+    {
+      "name": "DOMPurify sanitized HTML",
+      "kind": "html",
+      "source": "output.innerHTML = DOMPurify.sanitize(req.body.preview)",
+      "ignored": true
+    },
+    {
+      "name": "static HTML literal",
+      "kind": "html",
+      "source": "output.innerHTML = '<strong>Ready</strong>'",
+      "ignored": true
+    },
+    {
+      "name": "request code passed to eval",
+      "kind": "eval",
+      "source": "eval(req.body.code)",
+      "severity": "CRITICAL",
+      "confidence": "high"
+    },
+    {
+      "name": "static eval usage",
+      "kind": "eval",
+      "source": "eval('2 + 2')",
+      "severity": "LOW",
+      "confidence": "high"
+    },
+    {
+      "name": "process argument interpolated into command",
+      "kind": "command",
+      "source": "exec(`convert ${process.argv[2]} output.png`)",
+      "severity": "CRITICAL",
+      "confidence": "high"
+    },
+    {
+      "name": "unknown dynamic command",
+      "kind": "command",
+      "source": "exec(`git show ${trustedRevision}`)",
+      "severity": "MEDIUM",
+      "confidence": "low"
+    },
+    {
+      "name": "direct request redirect",
+      "kind": "redirect",
+      "source": "res.redirect(req.query.next)",
+      "severity": "HIGH",
+      "confidence": "high"
+    },
+    {
+      "name": "validated request redirect",
+      "kind": "redirect",
+      "source": "res.redirect(validateRedirect(req.query.next))",
+      "ignored": true
+    },
+    {
+      "name": "internal redirect variable",
+      "kind": "redirect",
+      "source": "res.redirect(nextRoute)",
+      "ignored": true
+    },
+    {
+      "name": "SHA1 file checksum",
+      "kind": "weak-hash",
+      "source": "createHash('sha1').update(fileContents)",
+      "severity": "LOW",
+      "confidence": "high"
+    },
+    {
+      "name": "SHA1 password hash",
+      "kind": "weak-hash",
+      "source": "createHash('sha1').update(password)",
+      "severity": "MEDIUM",
+      "confidence": "medium"
+    }
+  ]
+}

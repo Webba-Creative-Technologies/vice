@@ -1,6 +1,6 @@
 {
   "name": "vice-security",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "description": "VICE - Vulnerability Inspector & Code Examiner | Black-box & white-box security auditor for web applications",
   "author": "Webba Creative Technologies",
   "license": "MIT",
@@ -21,6 +21,7 @@
     "scan": "node scan.js",
     "audit": "node bin/vice.js audit .",
     "ci": "node bin/vice.js audit . --ci",
+    "test": "node --test",
     "prepublishOnly": "node --input-type=module -e \"import{readFileSync}from'fs';const p=JSON.parse(readFileSync('package.json'));console.log('Publishing '+p.name+'@'+p.version)\""
   },
   "keywords": ["security", "audit", "vulnerability", "scanner", "supabase", "pentest", "xss", "sql-injection", "owasp", "rls", "headers", "csp"],
@@ -38,7 +39,8 @@
   "dependencies": {
     "chalk": "^5.3.0",
     "inquirer": "^9.2.12",
-    "ora": "^7.0.1"
+    "ora": "^7.0.1",
+    "tldts": "^7.4.8"
   },
   "optionalDependencies": {
     "puppeteer": "^24.0.0"
