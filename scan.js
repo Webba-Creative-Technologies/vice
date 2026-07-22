@@ -46,6 +46,7 @@ import { classifyTraceResponse } from './src/core/detectors/http-methods.js';
 import { classifyWebSocketMessages, redactWebSocketUrl } from './src/core/detectors/websocket.js';
 import { resolveFirstPartyApiEndpoint } from './src/core/detectors/api-endpoint.js';
 import { auditAiRag } from './src/core/ai-rag/audit.js';
+import { loadAiRagCliConfig } from './src/core/ai-rag/cli-config.js';
 
 const DISCOVERY_BUDGETS = Object.freeze({
   scriptUrls: 150,
@@ -4599,9 +4600,29 @@ async function main(options = {}) {
           { name: 'WebSocket / Realtime (eavesdropping without auth)', value: 'websocket', checked: true },
           { name: 'TLS deeper analysis (cert, version, ciphers)', value: 'tls', checked: true },
           { name: 'WordPress specifics (user enum, xmlrpc, REST users)', value: 'wordpress', checked: true },
+          { name: 'AI/RAG application security (API, prompts, retrieval, tools)', value: 'ai-rag', checked: false },
         ],
       },
     ]));
+  }
+
+  let aiRag = options.aiRag;
+  if (modules.includes('ai-rag') && !aiRag) {
+    const { aiRagConfigPath } = await inquirer.prompt([{
+      type: 'input',
+      name: 'aiRagConfigPath',
+      message: chalk.bold('AI/RAG configuration file:'),
+      default: 'vice.ai-rag.json',
+      validate: (input) => {
+        try {
+          const stat = fs.statSync(path.resolve(input));
+          return stat.isFile() ? true : 'Enter a valid configuration file path';
+        } catch {
+          return 'Enter a valid configuration file path';
+        }
+      },
+    }]);
+    aiRag = loadAiRagCliConfig(aiRagConfigPath);
   }
 
   const baseUrl = url.replace(/\/+$/, '');
@@ -4615,7 +4636,7 @@ async function main(options = {}) {
       modules,
       authCookie: options.authCookie,
       authHeader: options.authHeader,
-      aiRag: options.aiRag,
+      aiRag,
       onProgress: ({ stage, module, message }) => {
         if (stage === 'start') scanSpinner.text = `Running ${module}...`;
         else if (message) scanSpinner.text = message;

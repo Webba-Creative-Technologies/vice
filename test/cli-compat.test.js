@@ -60,6 +60,10 @@ test('interactive scanner uses the same runScan orchestrator as consumers', () =
   assert.match(mainBody, /(?:const )?result = await runScan\(/);
   assert.doesNotMatch(mainBody, /await crawlAndExtract\(|await auditVps\(|await auditSupabase\(/);
   assert.match(mainBody, /await exportJson\(baseUrl, result\)/);
+  assert.match(mainBody, /AI\/RAG application security \(API, prompts, retrieval, tools\)/);
+  assert.match(mainBody, /value: 'ai-rag', checked: false/);
+  assert.match(mainBody, /AI\/RAG configuration file:/);
+  assert.match(mainBody, /loadAiRagCliConfig\(aiRagConfigPath\)/);
 });
 
 test('public CLI emits standalone JSON and SARIF reports', () => {
