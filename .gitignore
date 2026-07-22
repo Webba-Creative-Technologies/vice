@@ -4,8 +4,14 @@ scans/
 .vice-accepted
 *.log
 *.tgz
-MARKETING.md
 .DS_Store
 Thumbs.db
-.claude/
 .webba/
+
+# Chromium / Puppeteer crash-reporting data
+/Crashpad/
+/CrashpadMetrics*.pma
+
+# Local notes
+/BLACKBOX.md
+/.blackbox/
