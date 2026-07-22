@@ -429,6 +429,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. In short: fork, branch, P
 - Prompt injection, RAG isolation and connected tool evidence contracts
 - CLI configuration with environment-backed authentication profiles
 - Content-free AI audit metadata and redacted findings
+- Crawl and browser failures report incomplete coverage instead of critical vulnerabilities
 
 ### v3.3.0
 - Strict URL, DNS, redirect, browser and raw-socket scope enforcement

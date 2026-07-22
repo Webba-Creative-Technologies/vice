@@ -66,6 +66,11 @@ test('interactive scanner uses the same runScan orchestrator as consumers', () =
   assert.match(mainBody, /loadAiRagCliConfig\(aiRagConfigPath\)/);
 });
 
+test('crawl failures remain operational errors', () => {
+  assert.doesNotMatch(SCAN_SOURCE, /addFinding\([^\n]*Site unreachable/);
+  assert.match(SCAN_SOURCE, /throw new Error\(`Unable to load \$\{baseUrl\}: \$\{message\}`\)/);
+});
+
 test('public CLI emits standalone JSON and SARIF reports', () => {
   const fixture = createFixture();
   try {

@@ -207,8 +207,8 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
   try {
     browser = await launchBrowser();
   } catch (err) {
-    if (reportFindings) addFinding('CRITIQUE', 'Crawl', 'Unable to launch browser', err.message, 'Verify that Puppeteer/Chromium is properly installed');
-    return { scripts: [], html: '', pageUrls: [] };
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Unable to launch browser: ${message}`);
   }
 
   const page = await createBrowserPage(browser, baseUrl, { authenticated: true });
@@ -254,9 +254,9 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
   try {
     await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
   } catch (err) {
-    if (reportFindings) addFinding('CRITIQUE', 'Crawl', 'Site unreachable', `Unable to load ${baseUrl}: ${err.message}`, 'Verify that the site is online');
-    await browser.close();
-    return { scripts: [], html: '', pageUrls: [] };
+    const message = err instanceof Error ? err.message : String(err);
+    await browser.close().catch(() => {});
+    throw new Error(`Unable to load ${baseUrl}: ${message}`);
   }
 
   // Wait a bit for lazy-loaded scripts
