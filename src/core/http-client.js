@@ -4,8 +4,11 @@ import { ScopeError } from './scope.js';
 const clientStorage = new AsyncLocalStorage();
 const PASSIVE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
 
-function isExplicitReadOnlyPost(url, options) {
+function isApprovedPost(url, options) {
   if (String(options.method || 'GET').toUpperCase() !== 'POST') return false;
+  if (options.probe === 'ai-rag') {
+    return typeof options.body === 'string' && options.body.length > 0 && options.body.length <= 64 * 1024;
+  }
   if (options.readOnly === 'storage-list') {
     try { return new URL(String(url)).pathname.includes('/storage/v1/object/list/'); } catch { return false; }
   }
@@ -141,8 +144,8 @@ export function createHttpClient(options = {}) {
   async function request(url, requestOptions = {}) {
     counters.requests++;
     const requestMethod = String(requestOptions.method || 'GET').toUpperCase();
-    const readOnlyPost = isExplicitReadOnlyPost(url, requestOptions);
-    if (!PASSIVE_METHODS.has(requestMethod) && !readOnlyPost) {
+    const approvedPost = isApprovedPost(url, requestOptions);
+    if (!PASSIVE_METHODS.has(requestMethod) && !approvedPost) {
       counters.blocked_requests++;
       counters.mutations_blocked++;
       return null;
@@ -163,10 +166,12 @@ export function createHttpClient(options = {}) {
         maxResponseBytes: requestMaxBytes,
         signal: requestSignal,
         readOnly: ignoredReadOnly,
+        probe: ignoredProbe,
         ...fetchOptions
       } = requestOptions;
       void ignoredTimeout;
       void ignoredReadOnly;
+      void ignoredProbe;
       const detachAbortSignals = attachAbortSignals(controller, [clientSignal, requestSignal]);
 
       try {

@@ -31,6 +31,7 @@ import { loadBaseline, writeBaseline, applyBaseline, getBaselinePath } from '../
 import { loadConfig, applyTransform, loadCustomModules } from '../src/core/config.js';
 import { fingerprintFinding } from '../src/core/fingerprint.js';
 import { ENGINE_VERSION } from '../src/core/version.js';
+import { loadAiRagCliConfig } from '../src/core/ai-rag/cli-config.js';
 
 // ──────────── BANNER ────────────
 
@@ -237,6 +238,16 @@ async function runScanMode(options = {}) {
   }
   const { main: scanMain } = await import(pathToFileURL(scanPath).href);
   await scanMain(options);
+}
+
+function scanModules(args) {
+  const index = args.indexOf('--modules') !== -1 ? args.indexOf('--modules') : args.indexOf('--module');
+  if (index === -1) return null;
+  const value = args[index + 1];
+  if (!value || value.startsWith('--')) throw new Error('scan_modules_required');
+  const modules = [...new Set(value.split(',').map((module) => module.trim()).filter(Boolean))];
+  if (modules.length === 0) throw new Error('scan_modules_required');
+  return modules;
 }
 
 // ──────────── CI MODE ────────────
@@ -730,10 +741,21 @@ async function main() {
       const cookieIdx = args.indexOf('--auth-cookie');
       const headerIdx = args.indexOf('--auth-header');
       const urlIdx = args.indexOf('--url');
+      const aiRagConfigIdx = args.indexOf('--ai-rag-config');
+      let modules = scanModules(args);
+      let aiRag = null;
+      if (aiRagConfigIdx !== -1) {
+        aiRag = loadAiRagCliConfig(args[aiRagConfigIdx + 1]);
+        modules ??= ['ai-rag'];
+      }
+      if (modules?.includes('ai-rag') && !aiRag) throw new Error('ai_rag_config_required');
       const scanOptions = {
         authCookie: cookieIdx !== -1 ? args[cookieIdx + 1] : null,
         authHeader: headerIdx !== -1 ? args[headerIdx + 1] : null,
-        url: urlIdx !== -1 ? args[urlIdx + 1] : (args[1] && !args[1].startsWith('--') ? args[1] : null),
+        url: urlIdx !== -1 ? args[urlIdx + 1] : (args[1] && !args[1].startsWith('--') ? args[1] : aiRag?.endpoint ?? null),
+        modules,
+        aiRag,
+        nonInteractive: modules !== null,
       };
       await runScanMode(scanOptions);
       return;
@@ -770,6 +792,8 @@ async function main() {
     console.log('    vice audit . --severity-min HIGH     Only count CRITICAL+HIGH toward score');
     console.log('    vice scan <url> --auth-cookie "session=abc;remember=xyz"');
     console.log('    vice scan <url> --auth-header "Authorization: Bearer xxx"');
+    console.log('    vice scan <url> --ai-rag-config vice.ai-rag.json');
+    console.log('    vice scan <url> --modules headers,tls');
     console.log('    vice baseline [path]                 Snapshot current findings into .vice-baseline.json');
     console.log('    vice diff <old.json> <new.json>      Compare two scan reports');
     console.log('         [--json|--markdown]');

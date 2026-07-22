@@ -3,7 +3,13 @@ import ora from 'ora';
 import inquirer from 'inquirer';
 import puppeteer from 'puppeteer';
 import { getViceDataDir } from './src/utils/paths.js';
-import { ALL_MODULES, DEFAULT_LIBRARY_MODULES, PASSIVE_MODULES } from './src/core/modules.js';
+import {
+  ALL_MODULES,
+  AVAILABLE_MODULES,
+  DEFAULT_LIBRARY_MODULES,
+  PASSIVE_MODULES,
+  SPECIALIZED_MODULES,
+} from './src/core/modules.js';
 import { createScanMetrics } from './src/core/metrics.js';
 import { classifyCorsPolicy } from './src/core/detectors/cors.js';
 import { classifyCsrfEvidence, classifyStoredInputSurface } from './src/core/detectors/forms.js';
@@ -39,6 +45,7 @@ import { classifyUnauthenticatedApiResponse, findMassAssignmentSurfaces } from '
 import { classifyTraceResponse } from './src/core/detectors/http-methods.js';
 import { classifyWebSocketMessages, redactWebSocketUrl } from './src/core/detectors/websocket.js';
 import { resolveFirstPartyApiEndpoint } from './src/core/detectors/api-endpoint.js';
+import { auditAiRag } from './src/core/ai-rag/audit.js';
 
 const DISCOVERY_BUDGETS = Object.freeze({
   scriptUrls: 150,
@@ -4056,6 +4063,7 @@ export function buildBlackBoxReport(url, result = null, date = new Date().toISOS
     errors: result?.errors || [],
     metrics: result?.metrics || null,
     coverage: result?.coverage || null,
+    ai_rag_audit: result?.ai_rag_audit || null,
     score_breakdown: {
       total_penalty: calculated.total_penalty,
       breakdown: calculated.breakdown,
@@ -4337,6 +4345,7 @@ async function runScanInternal(config, httpClient, context) {
   const executeStep = (name, fn) => runStep(name, fn, errors, metrics, context.signal, config.onProgress);
   let jsContents = [];
   let supabaseAudit = null;
+  let aiRagAudit = null;
   const supabaseCreds = config.supabaseUrl
     ? { url: config.supabaseUrl, key: config.supabaseKey || null }
     : null;
@@ -4358,6 +4367,39 @@ async function runScanInternal(config, httpClient, context) {
 
   if (modules.includes('headers')) {
     await executeStep('headers', (spinner) => checkHeaders(baseUrl, spinner));
+  }
+
+  if (modules.includes('ai-rag')) {
+    aiRagAudit = await executeStep('ai-rag', async (spinner) => {
+      const result = await auditAiRag(baseUrl, config.aiRag, {
+        fetch: safeFetch,
+        onPhase: (phase) => {
+          spinner.text = `Testing AI/RAG ${phase}`;
+          emitScanProgress(config.onProgress, {
+            stage: 'progress',
+            module: `ai-rag-${phase}`,
+            message: `Testing AI/RAG ${phase}`,
+          });
+        },
+      });
+      for (const finding of result.findings) {
+        addFinding(
+          finding.severity,
+          finding.module,
+          finding.title,
+          finding.detail,
+          finding.recommendation,
+          {
+            rule_id: finding.rule_id,
+            classification: finding.classification,
+            confidence: finding.confidence,
+            evidence: finding.evidence,
+            standards: finding.standards,
+          },
+        );
+      }
+      return result.audit;
+    });
   }
 
   // Run when the module is selected AND we either crawled scripts or were handed
@@ -4423,9 +4465,12 @@ async function runScanInternal(config, httpClient, context) {
   if (scanMetrics.network.budget_exhausted) limitations.push('network_budget_exhausted');
   if (scanMetrics.scope.budget_exhausted) limitations.push('dns_budget_exhausted');
   if (modules.includes('supabase') && supabaseAudit?.inventoryComplete === false) limitations.push('supabase_schema_inventory_unavailable');
+  if (modules.includes('ai-rag') && aiRagAudit?.limitations?.length) limitations.push(...aiRagAudit.limitations);
   const coverage = summarizeCoverage(modules, scanMetrics.steps, { limitations });
   const supabaseOnly = modules.length === 1 && modules[0] === 'supabase';
-  const scoreAvailable = !supabaseOnly || supabaseAudit?.scoreAvailable === true;
+  const aiRagOnly = modules.length === 1 && modules[0] === 'ai-rag';
+  const scoreAvailable = (!supabaseOnly || supabaseAudit?.scoreAvailable === true)
+    && (!aiRagOnly || aiRagAudit?.scoreAvailable === true);
   return {
     target: baseUrl,
     score: scoreAvailable ? score.score : null,
@@ -4446,6 +4491,7 @@ async function runScanInternal(config, httpClient, context) {
       min_confidence: score.min_confidence,
     },
     completed_at: new Date().toISOString(),
+    ai_rag_audit: aiRagAudit,
   };
 }
 
@@ -4453,6 +4499,9 @@ async function runScan(config = {}) {
   if (!config.url) throw new Error('runScan requires a url');
   const baseUrl = normalizeScanUrl(config.url);
   const modules = config.modules?.length ? config.modules : DEFAULT_LIBRARY_MODULES;
+  if (modules.some((module) => !AVAILABLE_MODULES.includes(module))) {
+    throw new Error('invalid_scan_module');
+  }
   const allowedHosts = new Set(config.allowedHosts || []);
   if (config.supabaseUrl) {
     try { allowedHosts.add(new URL(config.supabaseUrl).hostname); } catch {}
@@ -4526,31 +4575,34 @@ async function main(options = {}) {
     url = answer.url;
   }
 
-  const { modules } = await inquirer.prompt([
-    {
-      type: 'checkbox',
-      name: 'modules',
-      message: chalk.bold('Modules to run:'),
-      choices: [
-        { name: 'Crawl & JS Analysis (secrets, IPs, API keys)', value: 'js', checked: true },
-        { name: 'Exposed sensitive files (.env, .git, etc.)', value: 'files', checked: true },
-        { name: 'HTTP security headers', value: 'headers', checked: true },
-        { name: 'Supabase audit (RLS, tables, auth)', value: 'supabase', checked: true },
-        { name: 'Auth Injection (signup, auth.users, admin endpoints)', value: 'authinjection', checked: true },
-        { name: 'VPS audit (port scan, services, banners, proxy bypass)', value: 'vps', checked: true },
-        { name: 'Attack tests (XSS, Clickjacking, CORS, Open Redirect, Path Traversal)', value: 'attacks', checked: true },
-        { name: 'Login audit (brute force, CSRF, SQL injection, enumeration, CSP bypass)', value: 'login', checked: true },
-        { name: 'Stack detection (frameworks, servers, services, versions)', value: 'stack', checked: true },
-        { name: 'Subdomain scanning', value: 'subdomains', checked: true },
-        { name: 'DNS & Email security (SPF, DKIM, DMARC)', value: 'dns', checked: true },
-        { name: 'API endpoint audit', value: 'api', checked: true },
-        { name: 'Storage / Buckets (Supabase Storage, S3, GCS)', value: 'storage', checked: true },
-        { name: 'WebSocket / Realtime (eavesdropping without auth)', value: 'websocket', checked: true },
-        { name: 'TLS deeper analysis (cert, version, ciphers)', value: 'tls', checked: true },
-        { name: 'WordPress specifics (user enum, xmlrpc, REST users)', value: 'wordpress', checked: true },
-      ],
-    },
-  ]);
+  let modules = options.modules;
+  if (!modules) {
+    ({ modules } = await inquirer.prompt([
+      {
+        type: 'checkbox',
+        name: 'modules',
+        message: chalk.bold('Modules to run:'),
+        choices: [
+          { name: 'Crawl & JS Analysis (secrets, IPs, API keys)', value: 'js', checked: true },
+          { name: 'Exposed sensitive files (.env, .git, etc.)', value: 'files', checked: true },
+          { name: 'HTTP security headers', value: 'headers', checked: true },
+          { name: 'Supabase audit (RLS, tables, auth)', value: 'supabase', checked: true },
+          { name: 'Auth Injection (signup, auth.users, admin endpoints)', value: 'authinjection', checked: true },
+          { name: 'VPS audit (port scan, services, banners, proxy bypass)', value: 'vps', checked: true },
+          { name: 'Attack tests (XSS, Clickjacking, CORS, Open Redirect, Path Traversal)', value: 'attacks', checked: true },
+          { name: 'Login audit (brute force, CSRF, SQL injection, enumeration, CSP bypass)', value: 'login', checked: true },
+          { name: 'Stack detection (frameworks, servers, services, versions)', value: 'stack', checked: true },
+          { name: 'Subdomain scanning', value: 'subdomains', checked: true },
+          { name: 'DNS & Email security (SPF, DKIM, DMARC)', value: 'dns', checked: true },
+          { name: 'API endpoint audit', value: 'api', checked: true },
+          { name: 'Storage / Buckets (Supabase Storage, S3, GCS)', value: 'storage', checked: true },
+          { name: 'WebSocket / Realtime (eavesdropping without auth)', value: 'websocket', checked: true },
+          { name: 'TLS deeper analysis (cert, version, ciphers)', value: 'tls', checked: true },
+          { name: 'WordPress specifics (user enum, xmlrpc, REST users)', value: 'wordpress', checked: true },
+        ],
+      },
+    ]));
+  }
 
   const baseUrl = url.replace(/\/+$/, '');
   console.log('');
@@ -4563,6 +4615,7 @@ async function main(options = {}) {
       modules,
       authCookie: options.authCookie,
       authHeader: options.authHeader,
+      aiRag: options.aiRag,
       onProgress: ({ stage, module, message }) => {
         if (stage === 'start') scanSpinner.text = `Running ${module}...`;
         else if (message) scanSpinner.text = message;
@@ -4589,14 +4642,16 @@ async function main(options = {}) {
   await exportJson(baseUrl, result);
 
   // Optional HTML export
-  const { wantHtml } = await inquirer.prompt([
-    {
-      type: 'confirm',
-      name: 'wantHtml',
-      message: 'Also export as HTML (visual report)?',
-      default: false,
-    },
-  ]);
+  const { wantHtml } = options.nonInteractive
+    ? { wantHtml: false }
+    : await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'wantHtml',
+          message: 'Also export as HTML (visual report)?',
+          default: false,
+        },
+      ]);
 
   if (wantHtml) {
     await exportHtml(baseUrl);
@@ -4605,7 +4660,7 @@ async function main(options = {}) {
   console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' - Scan complete.\n'));
 }
 
-export { main, runScan, ALL_MODULES, PASSIVE_MODULES };
+export { main, runScan, ALL_MODULES, AVAILABLE_MODULES, PASSIVE_MODULES, SPECIALIZED_MODULES };
 
 // Run directly if this file is the entry point
 const isDirectRun = process.argv[1] && (

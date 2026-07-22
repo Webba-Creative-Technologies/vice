@@ -139,6 +139,41 @@ test('HTTP client follows same-scope redirects manually', async () => {
   });
 });
 
+test('HTTP client permits bounded AI probe posts', async () => {
+  let body = '';
+  await withServer((request, response) => {
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => response.end('{"answer":"READY"}'));
+  }, async (url) => {
+    const client = createHttpClient();
+    const response = await client.fetch(url, {
+      method: 'POST',
+      probe: 'ai-rag',
+      body: '{"message":"READY"}',
+    });
+
+    assert.equal(await response.text(), '{"answer":"READY"}');
+    assert.equal(body, '{"message":"READY"}');
+    assert.equal(client.metrics().mutations_blocked, 0);
+  });
+});
+
+test('HTTP client rejects oversized AI probe posts', async () => {
+  await withServer((request, response) => response.end('unexpected'), async (url) => {
+    const client = createHttpClient();
+    const response = await client.fetch(url, {
+      method: 'POST',
+      probe: 'ai-rag',
+      body: 'x'.repeat(64 * 1024 + 1),
+    });
+
+    assert.equal(response, null);
+    assert.equal(client.metrics().network_requests, 0);
+    assert.equal(client.metrics().mutations_blocked, 1);
+  });
+});
+
 test('HTTP client rejects redirect destinations outside scope', async () => {
   let hits = 0;
   await withServer((request, response) => {

@@ -34,3 +34,12 @@ export const PASSIVE_MODULES = Object.freeze([
   'files',
   'js',
 ]);
+
+export const SPECIALIZED_MODULES = Object.freeze([
+  'ai-rag',
+]);
+
+export const AVAILABLE_MODULES = Object.freeze([
+  ...ALL_MODULES,
+  ...SPECIALIZED_MODULES,
+]);

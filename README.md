@@ -19,7 +19,7 @@
   <a href="#github-action"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Webba-Creative-Technologies/vice/main/.github/vice-badge.json" alt="VICE Security"></a>
   <a href="https://github.com/Webba-Creative-Technologies/vice/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node">
-  <img src="https://img.shields.io/badge/modules-26-995ff6" alt="Modules">
+  <img src="https://img.shields.io/badge/modules-27-995ff6" alt="Modules">
 </p>
 
 <br>
@@ -191,6 +191,41 @@ Give VICE a URL and it audits your site from the outside using a headless browse
 | **WebSocket** | Bounded handshake and message classification for Realtime and Socket.IO, with credentials and message bodies removed from reports |
 | **WordPress** | Version, user-enumeration and cron exposure signals qualified by recognizable WordPress responses |
 
+### AI and RAG security scan
+
+The `ai-rag` module audits AI application endpoints for access control, abuse
+protections, prompt injection, data exposure, RAG isolation and tool security.
+It runs only when an AI/RAG configuration is provided.
+
+Authentication values are loaded from environment variables. Literal secrets
+in the configuration file are rejected.
+
+```bash
+export VICE_AI_USER_A_TOKEN="token for test user A"
+export VICE_AI_USER_B_TOKEN="token for test user B"
+vice scan https://app.example.com --ai-rag-config vice.ai-rag.json
+```
+
+```json
+{
+  "endpoint": "https://app.example.com/api/chat",
+  "adapter": "generic-json",
+  "expectedAccess": "authenticated",
+  "suites": ["api", "llm", "rag", "tools"],
+  "messageField": "message",
+  "responseField": "answer",
+  "conversationRequestField": "conversationId",
+  "conversationResponseField": "conversationId",
+  "authProfiles": {
+    "a": { "type": "bearer", "secretEnv": "VICE_AI_USER_A_TOKEN" },
+    "b": { "type": "bearer", "secretEnv": "VICE_AI_USER_B_TOKEN" }
+  }
+}
+```
+
+The endpoint must share the scanned origin. Optional fixtures enable deeper RAG
+and tool checks. Reports omit credentials and captured response content.
+
 Here's what it looks like running:
 
 <p align="center">
@@ -265,6 +300,8 @@ Reports are saved in the `scans/` directory. You can also export older scans to 
 
 ```bash
 vice scan                          # Interactive remote scan
+vice scan <url> --modules headers,tls
+vice scan <url> --ai-rag-config vice.ai-rag.json
 vice audit .                       # Audit current directory
 vice audit /path/to/project        # Audit specific project
 vice audit . --ci                  # CI mode, exit 1 if score < 70
@@ -384,6 +421,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. In short: fork, branch, P
 <br>
 
 ## Changelog
+
+### v3.4.0
+- Specialized AI and RAG API security module with bounded active probes
+- Generic JSON, OpenAI-compatible JSON and SSE response adapters
+- Anonymous, invalid-auth and cross-user authorization comparisons
+- Prompt injection, RAG isolation and connected tool evidence contracts
+- CLI configuration with environment-backed authentication profiles
+- Content-free AI audit metadata and redacted findings
 
 ### v3.3.0
 - Strict URL, DNS, redirect, browser and raw-socket scope enforcement
