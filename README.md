@@ -423,13 +423,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. In short: fork, branch, P
 ## Changelog
 
 ### v3.4.0
-- Specialized AI and RAG API security module with bounded active probes
-- Generic JSON, OpenAI-compatible JSON and SSE response adapters
-- Anonymous, invalid-auth and cross-user authorization comparisons
-- Prompt injection, RAG isolation and connected tool evidence contracts
-- CLI configuration with environment-backed authentication profiles
-- Content-free AI audit metadata and redacted findings
-- Crawl and browser failures report incomplete coverage instead of critical vulnerabilities
+
+VICE 3.4.0 adds a specialized AI and RAG security module for application APIs,
+with bounded checks for access control, abuse protections, prompt injection,
+retrieval isolation, data exposure and connected tools. It supports generic
+JSON, OpenAI-compatible JSON and SSE responses, along with environment-backed
+authentication profiles and redacted evidence.
+
+The AI/RAG module is available from the interactive scanner and through a
+dedicated configuration file for automated runs. Crawl and browser failures now
+produce incomplete coverage diagnostics instead of critical findings,
+preventing temporary connectivity errors from affecting the security score.
 
 ### v3.3.0
 - Strict URL, DNS, redirect, browser and raw-socket scope enforcement
