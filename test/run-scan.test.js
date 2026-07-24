@@ -131,6 +131,47 @@ test('runScan waits for declared client bundles before analysis', async () => {
   }
 });
 
+test('runScan ignores credential placeholders in client bundles', async () => {
+  const server = http.createServer((request, response) => {
+    if (request.url === '/') {
+      response.setHeader('content-type', 'text/html');
+      response.end('<html><body><script src="/config.js"></script></body></html>');
+      return;
+    }
+    if (request.url === '/config.js') {
+      response.setHeader('content-type', 'application/javascript');
+      response.end(`
+        window.env = {
+          stripeSecret: "${['sk', 'test', 'x'.repeat(24)].join('_')}",
+          githubToken: "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          databaseUrl: "postgresql://user:password@db.example.com/app",
+          apiKey: "VITE_PUBLIC_API_KEY"
+        };
+      `);
+      return;
+    }
+    response.statusCode = 404;
+    response.end('not found');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const result = await runScan({
+      url: `http://127.0.0.1:${server.address().port}`,
+      modules: ['js'],
+      requestTimeoutMs: 1000,
+      allowPrivateTargets: true,
+    });
+
+    assert.equal(
+      result.findings.some(finding => finding.module === 'Secrets' && /detected$/i.test(finding.title)),
+      false,
+    );
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test('Supabase-only scans use client table fallback without web findings', async () => {
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, 'http://fixture.local');

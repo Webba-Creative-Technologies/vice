@@ -4,7 +4,7 @@ import test from 'node:test';
 import { classifySensitiveFile } from '../src/core/detectors/sensitive-file.js';
 
 test('sensitive file detector confirms private environment values', () => {
-  const result = classifySensitiveFile('/.env', 'DATABASE_URL=postgresql://user:pass@example.test/app', 'text/plain');
+  const result = classifySensitiveFile('/.env', 'DATABASE_URL=postgresql://user:A7f9K2mQ8vX4@db.acme-secure.net/app', 'text/plain');
   assert.equal(result.severity, 'CRITIQUE');
   assert.equal(result.classification, 'confirmed');
 });
@@ -12,6 +12,21 @@ test('sensitive file detector confirms private environment values', () => {
 test('sensitive file detector lowers public environment configuration', () => {
   const result = classifySensitiveFile('/.env.production', 'PUBLIC_SITE_NAME=VICE\nPUBLIC_THEME=dark', 'text/plain');
   assert.equal(result.severity, 'MOYENNE');
+});
+
+test('sensitive file detector does not confirm placeholder secrets', () => {
+  const result = classifySensitiveFile(
+    '/.env.example',
+    [
+      `STRIPE_SECRET_KEY=${['sk', 'test', 'x'.repeat(24)].join('_')}`,
+      'DATABASE_URL=postgresql://user:password@db.example.com/app',
+    ].join('\n'),
+    'text/plain',
+  );
+
+  assert.equal(result.severity, 'MOYENNE');
+  assert.equal(result.kind, 'environment configuration');
+  assert.equal(result.classification, 'probable');
 });
 
 test('sensitive file detector rejects SPA and fake responses', () => {

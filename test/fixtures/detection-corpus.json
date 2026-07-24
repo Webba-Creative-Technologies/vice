@@ -27,7 +27,7 @@
     },
     {
       "name": "generic API key assignment",
-      "source": "api_key = \"0123456789abcdef0123456789abcdef\"",
+      "source": "api_key = \"A7f9K2mQ8vX4cN6pR3sT5uW1yZ0bD4eH\"",
       "expectedPattern": "Generic API Key"
     },
     {
@@ -67,12 +67,12 @@
     },
     {
       "name": "Twilio auth token",
-      "source": "TWILIO_AUTH_TOKEN=0123456789abcdef0123456789abcdef",
+      "source": "TWILIO_AUTH_TOKEN=8f3a1c9e42b76d05a4e8c17f930d6b2a",
       "expectedPattern": "Twilio Auth Token"
     },
     {
       "name": "database credential URL",
-      "source": "DATABASE_URL=postgresql://admin:supersecret@db.example.com:5432/app",
+      "source": "DATABASE_URL=postgresql://admin:supersecret@db.acme-secure.net:5432/app",
       "expectedPattern": "Database Credential URL"
     },
     {
@@ -98,6 +98,26 @@
     {
       "name": "short development placeholder",
       "source": "const secret = \"development\";"
+    },
+    {
+      "name": "prefixed Stripe placeholder",
+      "sourceParts": ["const secret = \"sk_", "test_xxxxxxxxxxxxxxxxxxxxxxxx\";"]
+    },
+    {
+      "name": "prefixed GitHub placeholder",
+      "source": "const token = \"ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\";"
+    },
+    {
+      "name": "environment identifier in bundle",
+      "source": "const token = \"VITE_PUBLIC_API_TOKEN\";"
+    },
+    {
+      "name": "AWS documentation access key",
+      "source": "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
+    },
+    {
+      "name": "database example URL",
+      "source": "DATABASE_URL=postgresql://user:password@db.example.com/app"
     }
   ],
   "codeSinks": [

@@ -9,6 +9,9 @@ export function extractAssignedSecretValue(match) {
   const text = String(match || '').trim();
   const bearer = text.match(/^Bearer\s+([^\s]+)$/i);
   if (bearer) return bearer[1];
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return text;
+  const namedAssignment = text.match(/^[A-Za-z_][A-Za-z0-9_.-]*\s*(?:=|:(?!\/\/))\s*(.+)$/);
+  if (namedAssignment) return namedAssignment[1].replace(/^["']|["']$/g, '').trim();
   const quoted = text.match(/[=:]\s*["']([^"']+)["']\s*$/);
   if (quoted) return quoted[1];
   const assigned = text.match(/[=:"']+\s*([A-Za-z0-9_.!@#$%^&*\/-]+)\s*$/);
@@ -49,11 +52,69 @@ export function isPublicSupabaseAnonMatch(source, match, matchIndex = -1) {
 
 export function isPlaceholderSecret(match) {
   const text = String(match || '').trim();
-  const quoted = text.match(/["']([^"']+)["']\s*$/);
-  const assigned = text.match(/[=:]\s*([^\s]+)\s*$/);
-  const value = (quoted?.[1] || assigned?.[1] || text).replace(/^["']|["']$/g, '').trim();
+  const value = extractAssignedSecretValue(text).replace(/^["']|["']$/g, '').trim();
+  if (!value) return true;
 
-  return /^(?:your[_-].+|example(?:[_-].+)?|placeholder(?:[_-].+)?|x{3,}|y{3,}|z{3,}|changeme|replace[_-].+|insert[_-].+|todo|fixme|development|develop|dev|local|dummy|sample|testing?)$/i.test(value);
+  if (/^(?:(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP|NUXT_PUBLIC)_)?[A-Z][A-Z0-9_]{2,}$/.test(value)
+    && /(?:API|AUTH|CREDENTIAL|KEY|PASSWORD|SECRET|TOKEN)/.test(value)) {
+    return true;
+  }
+
+  if (/^AKIAIOSFODNN7EXAMPLE$|^ASIA[A-Z0-9]{9}EXAMPLE$/i.test(value)) return true;
+  if (/aws[_-]?(?:secret|secret[_-]?access)[_-]?key/i.test(text) && /EXAMPLEKEY$/i.test(value)) return true;
+
+  if (/^(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value);
+      const host = parsed.hostname.toLowerCase();
+      const password = decodeURIComponent(parsed.password || '');
+      if (/(^|\.)(?:example\.(?:com|net|org)|example|invalid|test)$/.test(host)) return true;
+      if (password && isPlaceholderValue(password)) return true;
+    } catch {}
+  }
+
+  const discordToken = value.match(/^https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/([^/?#]+)/i)?.[1];
+  if (discordToken && isPlaceholderValue(discordToken)) return true;
+
+  const providerBody = value
+    .replace(/^(?:sk|pk)_(?:live|test)_/i, '')
+    .replace(/^gh[pousr]_/i, '')
+    .replace(/^github_pat_/i, '')
+    .replace(/^glpat-/i, '')
+    .replace(/^npm_/i, '')
+    .replace(/^pypi-AgEIcHlwaS5vcmc/i, '')
+    .replace(/^xox[baprs]-/i, '')
+    .replace(/^SG\./i, '')
+    .replace(/^AIzaSy/i, '')
+    .replace(/^AIza/i, '');
+
+  return isPlaceholderValue(value) || (providerBody !== value && isPlaceholderValue(providerBody));
+}
+
+function isPlaceholderValue(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  const compact = normalized.replace(/[^a-z0-9]/g, '');
+
+  if (/^(?:redacted|masked|hidden|none|null|undefined|todo|fixme|development|develop|dev|local|testing|testonly)$/.test(compact)) {
+    return true;
+  }
+
+  if (/^(?:your|example|placeholder|dummy|sample|fake|mock)(?:api|access|auth|client|credential|key|password|private|public|secret|service|stripe|token|value|here|aws|firebase|github|gitlab|npm|sendgrid|slack|twilio)*\d*$/.test(compact)) {
+    return true;
+  }
+
+  if (/^(?:changeme|replaceme|replace(?:this|withrealvalue|withsecret)|insert(?:key|secret|token|value)?here|notareal(?:key|password|secret|token)|notasecret)$/.test(compact)) {
+    return true;
+  }
+
+  if (/^(?:x+|y+|z+|0+)$/.test(compact)) return true;
+  if (compact.length < 12) return false;
+  if (compact.length > 4096) return false;
+
+  const repetitionLength = (compact + compact).indexOf(compact, 1);
+  return repetitionLength > 0
+    && repetitionLength < compact.length
+    && compact.length % repetitionLength === 0;
 }
 
 export const SECRET_PATTERNS = [

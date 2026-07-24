@@ -26,6 +26,16 @@ test('redacted secrets are not reported as exposed credentials', () => {
   assert.equal(result.kind, 'public-json');
 });
 
+test('provider-formatted placeholders are not exposed credentials', () => {
+  const result = classifyPublicJson({
+    secret: ['sk', 'test', 'x'.repeat(24)].join('_'),
+    token: 'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    api_key: 'VITE_PUBLIC_API_KEY',
+  });
+
+  assert.equal(result.kind, 'public-json');
+});
+
 test('personal data is classified from exact field names', () => {
   const result = classifyPublicJson({
     users: [

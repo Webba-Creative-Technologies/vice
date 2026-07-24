@@ -6,6 +6,7 @@
 import fs from 'fs';
 import path from 'path';
 import { addFinding } from '../core/findings.js';
+import { isPlaceholderSecret } from '../utils/patterns.js';
 
 export async function auditEnvFiles(projectPath, spinner) {
   spinner.text = 'Auditing environment files...';
@@ -49,7 +50,7 @@ export async function auditEnvFiles(projectPath, spinner) {
 
       const [, key, value] = match;
       const cleanValue = value.replace(/^["']|["']$/g, '');
-      if (!cleanValue || /your_|example|changeme|replace|xxx/i.test(cleanValue)) continue;
+      if (!cleanValue || isPlaceholderSecret(`${key}=${cleanValue}`)) continue;
 
       const sensitiveKeys = /SECRET|PASSWORD|PRIVATE|SERVICE_ROLE|DATABASE_URL|REDIS_URL|SMTP_PASS|API_SECRET|JWT_SECRET|ENCRYPTION_KEY|MASTER_KEY/i;
 

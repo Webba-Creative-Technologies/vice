@@ -434,6 +434,9 @@ The AI/RAG module is available from the interactive scanner and through a
 dedicated configuration file for automated runs. Crawl and browser failures now
 produce incomplete coverage diagnostics instead of critical findings,
 preventing temporary connectivity errors from affecting the security score.
+Credential detection also filters provider-formatted placeholders, environment
+identifiers, documentation keys, repeated filler values and example database
+URLs across client bundles, source maps and local audits.
 
 ### v3.3.0
 - Strict URL, DNS, redirect, browser and raw-socket scope enforcement

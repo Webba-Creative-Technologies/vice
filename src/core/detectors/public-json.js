@@ -1,3 +1,5 @@
+import { isPlaceholderSecret } from '../../utils/patterns.js';
+
 const CREDENTIAL_KEYS = new Set([
   'password',
   'password_hash',
@@ -46,6 +48,7 @@ function meaningfulValue(value) {
   const text = String(value).trim();
   if (text.length < 4 || PLACEHOLDERS.test(text)) return false;
   if (/^(?:process\.env|import\.meta\.env|env\.)/i.test(text)) return false;
+  if (isPlaceholderSecret(text)) return false;
   return true;
 }
 

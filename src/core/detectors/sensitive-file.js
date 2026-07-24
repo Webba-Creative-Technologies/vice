@@ -1,5 +1,7 @@
+import { isPlaceholderSecret } from '../../utils/patterns.js';
+
 const ENV_LINE = /^\s*(?:export\s+)?[A-Z][A-Z0-9_]{1,80}\s*=.+$/m;
-const PRIVATE_ENV = /(?:DATABASE_URL|PRIVATE_KEY|SECRET|PASSWORD|PASSWD|TOKEN|SERVICE_ROLE|ACCESS_KEY)\s*=/i;
+const PRIVATE_ENV_KEY = /(?:DATABASE_URL|PRIVATE_KEY|SECRET|PASSWORD|PASSWD|TOKEN|SERVICE_ROLE|ACCESS_KEY)/i;
 const PRIVATE_JSON_KEY = /["'](?:password|passwd|secret|private_key|service_role|database_url|access_token)["']\s*:/i;
 
 export function classifySensitiveFile(path, body, mediaType = '') {
@@ -9,7 +11,11 @@ export function classifySensitiveFile(path, body, mediaType = '') {
 
   if (/\/\.env(?:\.|$)/i.test(path)) {
     if (!ENV_LINE.test(value)) return null;
-    const privateValue = PRIVATE_ENV.test(value);
+    const privateValue = value.split(/\r?\n/).some((line) => {
+      const assignment = line.match(/^\s*(?:export\s+)?([A-Z][A-Z0-9_]{1,80})\s*=(.+)$/);
+      if (!assignment || !PRIVATE_ENV_KEY.test(assignment[1])) return false;
+      return !isPlaceholderSecret(`${assignment[1]}=${assignment[2].trim()}`);
+    });
     return {
       severity: privateValue ? 'CRITIQUE' : 'MOYENNE',
       confidence: 'high',

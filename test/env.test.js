@@ -28,3 +28,31 @@ test('environment audit discovers example and sample variants', async () => {
     await rm(project, { recursive: true, force: true });
   }
 });
+
+test('environment audit ignores documented placeholder formats', async () => {
+  const project = await mkdtemp(path.join(tmpdir(), 'vice-env-'));
+
+  try {
+    await writeFile(path.join(project, '.gitignore'), '.env*\n!.env.example\n', 'utf8');
+    await writeFile(
+      path.join(project, '.env.example'),
+      [
+        `STRIPE_SECRET_KEY=${['sk', 'test', 'x'.repeat(24)].join('_')}`,
+        'DATABASE_URL=postgresql://user:password@db.example.com/app',
+        'JWT_SECRET=VITE_PUBLIC_JWT_SECRET',
+      ].join('\n'),
+      'utf8',
+    );
+    clearFindings();
+
+    await auditEnvFiles(project, spinner);
+
+    assert.equal(
+      getFindings().some((item) => item.title.includes('contains a real secret value')),
+      false,
+    );
+  } finally {
+    clearFindings();
+    await rm(project, { recursive: true, force: true });
+  }
+});

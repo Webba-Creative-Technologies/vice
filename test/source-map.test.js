@@ -21,17 +21,18 @@ test('ordinary client source maps stay low severity', () => {
 });
 
 test('embedded credential material makes source maps critical', () => {
+  const stripeKey = ['sk', 'live', '1234567890abcdefghijkl'].join('_');
   const result = analyzeSourceMap(JSON.stringify({
     version: 3,
     sources: ['src/config.ts'],
-    sourcesContent: ['export const stripe = "sk_live_1234567890abcdefghijkl";'],
+    sourcesContent: [`export const stripe = "${stripeKey}";`],
     mappings: '',
   }));
 
   assert.equal(result.kind, 'credentials');
   assert.equal(result.severity, 'CRITIQUE');
   assert.deepEqual(result.secretTypes, ['Stripe Secret Key']);
-  assert.equal(JSON.stringify(result).includes('sk_live_'), false);
+  assert.equal(JSON.stringify(result).includes(['sk', 'live', ''].join('_')), false);
 });
 
 test('server source paths raise exposure severity without secrets', () => {
@@ -51,6 +52,22 @@ test('source maps ignore public credential identifiers', () => {
     version: 3,
     sources: ['src/api.ts'],
     sourcesContent: ['const SUPABASE_ANON_KEY = "public"; fetch(url, { headers: { apikey: SUPABASE_ANON_KEY } });'],
+    mappings: '',
+  }));
+
+  assert.equal(result.kind, 'source-metadata');
+  assert.deepEqual(result.secretTypes, []);
+});
+
+test('source maps ignore provider-formatted credential placeholders', () => {
+  const result = analyzeSourceMap(JSON.stringify({
+    version: 3,
+    sources: ['src/config.ts'],
+    sourcesContent: [
+      `export const stripe = "${['sk', 'test', 'x'.repeat(24)].join('_')}";`,
+      'export const github = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";',
+      'export const database = "postgresql://user:password@db.example.com/app";',
+    ],
     mappings: '',
   }));
 

@@ -9,6 +9,8 @@ import { isPlaceholderSecret, SECRET_PATTERNS } from '../src/utils/patterns.js';
 const corpus = JSON.parse(readFileSync(new URL('./fixtures/detection-corpus.json', import.meta.url), 'utf8'));
 corpus.positives = corpus.positives
   .map(entry => ({ ...entry, source: entry.source ?? entry.sourceParts?.join('') }));
+corpus.negatives = corpus.negatives
+  .map(entry => ({ ...entry, source: entry.source ?? entry.sourceParts?.join('') }));
 
 function matchingPatternNames(source) {
   return SECRET_PATTERNS
