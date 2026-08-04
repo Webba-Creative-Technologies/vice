@@ -24,8 +24,8 @@ test('public API classifier separates catalog and personal data', () => {
   assert.equal(personal.severity, 'ELEVEE');
 });
 
-test('public API classifier keeps unknown admin responses probable', () => {
+test('public API classifier keeps unknown admin responses informational', () => {
   const result = classifyUnauthenticatedApiResponse('/api/admin/stats', { uptime: 42 });
-  assert.equal(result.severity, 'MOYENNE');
-  assert.equal(result.classification, 'probable');
+  assert.equal(result.severity, 'INFO');
+  assert.equal(result.classification, 'heuristic');
 });

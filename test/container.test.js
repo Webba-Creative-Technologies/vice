@@ -42,6 +42,22 @@ test('container audit ignores localhost Compose bindings', async () => {
   }
 });
 
+test('container audit treats an ordinary published web port as intentional', async () => {
+  const project = await mkdtemp(path.join(tmpdir(), 'vice-compose-'));
+
+  try {
+    await writeFile(path.join(project, 'compose.yml'), 'services:\n  app:\n    image: app:1.0.0\n    ports:\n      - "8080:8080"\n', 'utf8');
+    clearFindings();
+
+    await auditContainer(project, spinner);
+
+    assert.equal(getFindings().some((item) => item.title.includes('0.0.0.0:8080')), false);
+  } finally {
+    clearFindings();
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
 test('container audit detects host escape and isolation controls', async () => {
   const project = await mkdtemp(path.join(tmpdir(), 'vice-compose-'));
 

@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { addFinding } from '../core/findings.js';
+import { isLikelyGenericSecret, isPlaceholderSecret } from '../utils/patterns.js';
 
 function getLine(content, position) {
   return content.substring(0, position).split('\n').length;
@@ -48,15 +49,15 @@ export async function auditCiSecurity(projectPath, spinner) {
       if (!/^[a-f0-9]{40}$/i.test(ref)) {
         const line = getLine(content, m.index);
         addFinding(
-          'MEDIUM',
+          'INFO',
           'CI/CD Security',
           `Unpinned action ${action}@${ref} in ${rel}:${line}`,
           `Action is referenced by tag/branch (${ref}) instead of a commit SHA. A maintainer (or attacker who compromises the repo) can move the tag to malicious code.`,
           `Pin to a full 40-char SHA: uses: ${action}@<sha>  # ${ref}`,
           { file: rel, line },
-          'medium'
+          'high',
+          { rule_id: 'vice/ci/mutable-action-ref', classification: 'hardening' },
         );
-        totalIssues++;
       }
     }
 
@@ -72,17 +73,6 @@ export async function auditCiSecurity(projectPath, spinner) {
           `Use the pull_request event instead, or do not check out PR code from a pull_request_target workflow.`,
           { file: rel },
           'high'
-        );
-        totalIssues++;
-      } else {
-        addFinding(
-          'MEDIUM',
-          'CI/CD Security',
-          `pull_request_target trigger in ${rel}`,
-          `pull_request_target runs with secrets and the base branch's permissions. Verify no untrusted PR code is executed.`,
-          `Audit each step in this workflow to ensure no PR-controlled input flows into shell commands or builds.`,
-          { file: rel },
-          'medium'
         );
         totalIssues++;
       }
@@ -153,11 +143,10 @@ export async function auditCiSecurity(projectPath, spinner) {
         const tag = img.split(':')[1];
         if (!tag || tag === 'latest') {
           const line = getLine(content, m.index);
-          addFinding('LOW', 'CI/CD Security', `GitLab CI image without explicit tag in ${rel}:${line}`,
+          addFinding('INFO', 'CI/CD Security', `GitLab CI image without explicit tag in ${rel}:${line}`,
             `${m[0].trim()}\nPipeline image is not version-pinned, builds are non-reproducible.`,
             `Pin to a specific version: image: ${img.split(':')[0]}:1.2.3`,
             { file: rel, line }, 'high');
-          totalIssues++;
         }
       }
 
@@ -165,11 +154,10 @@ export async function auditCiSecurity(projectPath, spinner) {
       const varSecretRegex = /^[ \t]+(\w*(?:SECRET|PASSWORD|API[_-]?KEY|TOKEN|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)\w*)\s*:\s*["']?([^"'\n#$]+)["']?/gim;
       while ((m = varSecretRegex.exec(content)) !== null) {
         const value = m[2].trim();
-        if (!value || value.length < 6) continue;
-        if (/your_|example|placeholder|xxx|changeme|\$/i.test(value)) continue;
+        if (!value || isPlaceholderSecret(`${m[1]}=${value}`) || !isLikelyGenericSecret(value)) continue;
         const line = getLine(content, m.index);
         addFinding('CRITICAL', 'CI/CD Security', `Hardcoded secret in ${rel}:${line}`,
-          `${m[0].trim()}\nSecret committed to the pipeline file.`,
+          `${m[1]} contains a literal value in the pipeline file. The value is omitted from the finding.`,
           `Move to GitLab CI/CD Variables (Settings > CI/CD > Variables) with "Protected" + "Masked" flags.`,
           { file: rel, line }, 'high');
         totalIssues++;
@@ -205,11 +193,10 @@ export async function auditCiSecurity(projectPath, spinner) {
         const ref = m[3];
         if (/^volatile$/i.test(ref) || /^dev:/i.test(ref)) {
           const line = getLine(content, m.index);
-          addFinding('MEDIUM', 'CI/CD Security', `Mutable orb reference ${m[2]}@${ref} in ${rel}:${line}`,
+          addFinding('INFO', 'CI/CD Security', `Mutable orb reference ${m[2]}@${ref} in ${rel}:${line}`,
             `Orbs with @volatile or @dev:* can change without notice. A maintainer can push malicious updates.`,
             `Pin to a fixed semver: ${m[2]}@1.2.3`,
-            { file: rel, line }, 'medium');
-          totalIssues++;
+            { file: rel, line }, 'high', { rule_id: 'vice/ci/mutable-orb-ref', classification: 'hardening' });
         }
       }
 

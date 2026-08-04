@@ -1,6 +1,7 @@
 import { classifyPublicJson } from './public-json.js';
 
 const SENSITIVE_TABLE = /(?:^|_)(?:users?|profiles?|accounts?|payments?|orders?|purchases?|transactions?|subscriptions?|credentials?|secrets?|tokens?|admins?|api_keys?|bank_accounts?)(?:$|_)/i;
+const HIGH_RISK_TABLE = /(?:^|_)(?:payments?|transactions?|credentials?|secrets?|tokens?|api_keys?|bank_accounts?)(?:$|_)/i;
 
 const TABLE_CANDIDATE = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
 
@@ -100,8 +101,8 @@ export function classifySupabaseRead(table, data) {
 
   if (SENSITIVE_TABLE.test(table)) {
     return {
-      severity: 'ELEVEE',
-      title: `Sensitive table "${table}" is readable with anon access`,
+      severity: HIGH_RISK_TABLE.test(table) ? 'MOYENNE' : 'INFO',
+      title: `${HIGH_RISK_TABLE.test(table) ? 'Potentially sensitive' : 'Public'} table "${table}" is readable with anon access`,
       paths: [],
     };
   }

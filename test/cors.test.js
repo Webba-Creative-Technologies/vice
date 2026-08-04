@@ -24,7 +24,7 @@ test('CORS lowers reflected origins without credentials', () => {
   });
 
   assert.equal(result.kind, 'reflected-origin');
-  assert.equal(result.severity, 'MOYENNE');
+  assert.equal(result.severity, 'INFO');
 });
 
 test('CORS treats public wildcard as informational', () => {

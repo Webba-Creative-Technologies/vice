@@ -56,3 +56,36 @@ test('environment audit ignores documented placeholder formats', async () => {
     await rm(project, { recursive: true, force: true });
   }
 });
+
+test('environment audit does not require gitignore when no private environment file exists', async () => {
+  const project = await mkdtemp(path.join(tmpdir(), 'vice-env-'));
+
+  try {
+    await writeFile(path.join(project, '.env.example'), 'API_SECRET=your_api_secret_here\n', 'utf8');
+    clearFindings();
+
+    await auditEnvFiles(project, spinner);
+
+    assert.equal(getFindings().some((item) => /gitignore/i.test(item.title)), false);
+  } finally {
+    clearFindings();
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
+test('environment audit accepts an explicit ignore rule for the detected file', async () => {
+  const project = await mkdtemp(path.join(tmpdir(), 'vice-env-'));
+
+  try {
+    await writeFile(path.join(project, '.gitignore'), '.env.local\n', 'utf8');
+    await writeFile(path.join(project, '.env.local'), 'DATABASE_URL=postgresql://user:password@localhost/app\n', 'utf8');
+    clearFindings();
+
+    await auditEnvFiles(project, spinner);
+
+    assert.equal(getFindings().some((item) => item.title === 'Environment files are not ignored by Git'), false);
+  } finally {
+    clearFindings();
+    await rm(project, { recursive: true, force: true });
+  }
+});

@@ -51,6 +51,7 @@ export async function auditCodeVulnerabilities(projectPath, spinner, isIgnored =
 
     const seen = new Set();
     const reportOnce = (signal, ruleId, line, detail, recommendation) => {
+      if (!signal || signal.classification === 'heuristic' || signal.classification === 'hardening') return;
       const family = ruleId.startsWith('sqli-') ? 'sqli' : ruleId;
       const key = `${family}:${line}`;
       if (seen.has(key)) return;

@@ -250,13 +250,13 @@ vice audit /path/to/project
 | **Code Secrets** | Hardcoded API keys and tokens in source files, with line numbers and fix suggestions |
 | **Environment Files** | `.env` in `.gitignore`, real secrets in `.env.example`, sensitive config files exposed |
 | **Dependencies** | `npm audit` for CVEs, outdated packages with known vulnerabilities |
-| **Supabase RLS** | SQL migrations analyzed for missing `ENABLE ROW LEVEL SECURITY`, empty policies, unsafe grants, SECURITY DEFINER without auth checks |
-| **Auth & Middleware** | Rate limiting presence, CORS wildcards, CSRF protection, session config, JWT expiration, hardcoded passwords |
+| **Supabase RLS** | Supabase migrations analyzed for missing `ENABLE ROW LEVEL SECURITY`, unsafe policies, grants and SECURITY DEFINER functions |
+| **Auth & Middleware** | Explicitly unsafe credentialed CORS, session cookies, JWT options and hardcoded passwords |
 | **Code Vulnerabilities** | SQL injection (template literals in queries), XSS (`v-html`, `dangerouslySetInnerHTML`, `innerHTML`), `eval()`, command injection, open redirects, weak crypto, ReDoS |
-| **Headers Config** | CSP and HSTS configuration in Nuxt, Next.js, Vercel, Netlify, Express configs |
+| **Headers Config** | CSP and HSTS hardening in server and deployment configurations that manage response headers |
 | **Git History** | Credential patterns in recent commits, with values redacted from findings and reports |
-| **Container & IaC** | Docker socket access, privileged containers, host namespaces, public ports and missing isolation controls |
-| **CI/CD Security** | Unpinned actions, dangerous workflow permissions, pull_request_target risks and expression injection |
+| **Container & IaC** | Docker socket access, privileged containers, host namespaces, exposed database ports and explicit root users |
+| **CI/CD Security** | Mutable third-party actions, dangerous workflow permissions and confirmed untrusted input execution |
 
 <br>
 
@@ -437,6 +437,12 @@ preventing temporary connectivity errors from affecting the security score.
 Credential detection also filters provider-formatted placeholders, environment
 identifiers, documentation keys, repeated filler values and example database
 URLs across client bundles, source maps and local audits.
+
+This release also applies stricter evidence and applicability rules across the
+scanner. Missing controls are reported only when the related feature and
+enforcement layer can be established. SPA fallback pages, temporary DNS
+failures, generic migrations, ordinary public storage, unconfirmed services
+and informational technology disclosures no longer affect the security score.
 
 ### v3.3.0
 - Strict URL, DNS, redirect, browser and raw-socket scope enforcement

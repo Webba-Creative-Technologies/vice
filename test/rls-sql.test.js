@@ -91,3 +91,40 @@ test('RLS audit evaluates the final ordered migration state', async () => {
     await rm(project, { recursive: true, force: true });
   }
 });
+
+test('RLS audit ignores generic non-Supabase migrations', async () => {
+  const project = await mkdtemp(path.join(tmpdir(), 'vice-rls-'));
+  const migrations = path.join(project, 'prisma', 'migrations', '001_initial');
+
+  try {
+    await mkdir(migrations, { recursive: true });
+    await writeFile(path.join(migrations, 'migration.sql'), 'CREATE TABLE users (id integer primary key);', 'utf8');
+    clearFindings();
+
+    await auditSupabaseRls(project, spinner);
+
+    assert.equal(getFindings().some((finding) => finding.title.includes('without RLS')), false);
+  } finally {
+    clearFindings();
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
+test('RLS without policies is reported as deny by default', async () => {
+  const project = await mkdtemp(path.join(tmpdir(), 'vice-rls-'));
+  const migrations = path.join(project, 'supabase', 'migrations');
+
+  try {
+    await mkdir(migrations, { recursive: true });
+    await writeFile(path.join(migrations, '001_private.sql'), 'CREATE TABLE public.private_notes (id uuid);\nALTER TABLE public.private_notes ENABLE ROW LEVEL SECURITY;', 'utf8');
+    clearFindings();
+
+    await auditSupabaseRls(project, spinner);
+
+    const finding = getFindings().find((item) => item.title.includes('deny-by-default'));
+    assert.equal(finding?.severity, 'INFO');
+  } finally {
+    clearFindings();
+    await rm(project, { recursive: true, force: true });
+  }
+});

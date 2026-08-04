@@ -15,8 +15,16 @@ export function classifyOpenService(port, banner = '') {
   const name = SERVICE_NAMES[port] || `service on port ${port}`;
 
   if (port === 80 || port === 443) return null;
-  if (port === 23) return result(port, 'CRITIQUE', 'high', 'confirmed', 'insecure-protocol', 'Telnet is reachable from the Internet', 'Disable Telnet and use SSH.');
-  if (port === 21) return result(port, 'ELEVEE', 'high', 'confirmed', 'insecure-protocol', 'FTP is reachable from the Internet', 'Use SFTP or another encrypted transfer protocol.');
+  if (port === 23) {
+    return /telnet|login:|password:/i.test(text)
+      ? result(port, 'CRITIQUE', 'high', 'confirmed', 'insecure-protocol', 'Telnet is reachable from the Internet', 'Disable Telnet and use SSH.')
+      : result(port, 'INFO', 'low', 'heuristic', 'port-only', 'Port 23 is open but Telnet is unconfirmed');
+  }
+  if (port === 21) {
+    return /^(?:220|120)[^\n]*(?:ftp|file|service|ready)/im.test(text)
+      ? result(port, 'ELEVEE', 'high', 'confirmed', 'insecure-protocol', 'FTP is reachable from the Internet', 'Use SFTP or another encrypted transfer protocol.')
+      : result(port, 'INFO', 'low', 'heuristic', 'port-only', 'Port 21 is open but FTP is unconfirmed');
+  }
   if (port === 22) return result(port, 'INFO', 'high', 'confirmed', 'reachable', 'SSH is reachable from the Internet', 'Restrict source addresses and prefer key authentication.');
   if (port === 25) return result(port, 'INFO', 'high', 'confirmed', 'reachable', 'SMTP is reachable from the Internet', 'An open port does not prove open relay; test relay policy separately.');
 
@@ -29,20 +37,20 @@ export function classifyOpenService(port, banner = '') {
   if ([3306, 5432, 27017].includes(port)) {
     const protocolSeen = /mysql|mariadb|postgres|mongodb|wire protocol|authentication/i.test(text);
     return protocolSeen
-      ? result(port, 'MOYENNE', 'high', 'probable', 'protocol-confirmed', `${name} protocol is reachable from the Internet`, `Restrict ${name} to private networks and require encrypted authentication.`)
+      ? result(port, 'INFO', 'high', 'confirmed', 'protocol-confirmed', `${name} protocol is reachable from the Internet`, `Restrict ${name} to private networks when public access is not required.`)
       : result(port, 'FAIBLE', 'low', 'heuristic', 'port-only', `Port ${port} is open but ${name} access is unconfirmed`, `Identify the service and restrict database exposure if confirmed.`);
   }
 
   if (port === 9200) {
     if (/HTTP\/\d(?:\.\d)?\s+(?:401|403)|www-authenticate/i.test(text)) return result(port, 'INFO', 'high', 'confirmed', 'auth-required', 'Elasticsearch endpoint is reachable but access-controlled', 'Keep authentication enabled and restrict network exposure.');
-    if (/HTTP\/\d(?:\.\d)?\s+200|elasticsearch|x-elastic-product/i.test(text)) return result(port, 'ELEVEE', 'medium', 'probable', 'http-reachable', 'Probable Elasticsearch HTTP endpoint is publicly reachable', 'Require authentication and restrict the endpoint to trusted networks.');
+    if (/HTTP\/\d(?:\.\d)?\s+200|elasticsearch|x-elastic-product/i.test(text)) return result(port, 'INFO', 'high', 'confirmed', 'http-reachable', 'Elasticsearch HTTP endpoint is reachable', 'Verify that data and administrative APIs require authentication.');
     return result(port, 'FAIBLE', 'low', 'heuristic', 'port-only', 'Port 9200 is open but Elasticsearch is unconfirmed', 'Identify the service before treating this as Elasticsearch exposure.');
   }
 
   if ([3000, 4200, 5555, 8888, 9000, 9090].includes(port)) {
     const recognized = /next\.js|nuxt|angular|prisma|jupyter|portainer|prometheus|grafana|HTTP\/\d/i.test(text);
     return recognized
-      ? result(port, 'MOYENNE', 'medium', 'probable', 'service-confirmed', `${name} appears publicly reachable`, `Authenticate ${name} and restrict it to trusted networks.`)
+      ? result(port, 'INFO', 'high', 'confirmed', 'service-confirmed', `${name} appears publicly reachable`, `Verify that administrative functionality requires authentication.`)
       : result(port, 'FAIBLE', 'low', 'heuristic', 'port-only', `Port ${port} is open but ${name} is unconfirmed`, 'Identify the service and review whether public exposure is intended.');
   }
 

@@ -21,6 +21,11 @@ test('GraphQL introspection is not classified as a vulnerability', () => {
   assert.equal(classifyHardeningSignal('graphql-introspection').severity, 'INFO');
 });
 
+test('missing SRI and frame protection are informational', () => {
+  assert.equal(classifyHardeningSignal('missing-sri').severity, 'INFO');
+  assert.equal(classifyHardeningSignal('missing-frame-protection').severity, 'INFO');
+});
+
 test('unknown hardening signals are ignored', () => {
   assert.equal(classifyHardeningSignal('unknown'), null);
 });

@@ -91,7 +91,7 @@ test('black-box reports explain score and coverage', () => {
   }, '2026-07-12T00:00:00.000Z');
 
   assert.equal(report.engine_version, '3.4.0');
-  assert.equal(report.ruleset_version, '2026.07.22.1');
+  assert.equal(report.ruleset_version, '2026.08.04.1');
   assert.equal(report.score_reliable, false);
   assert.equal(report.score_breakdown.total_penalty, 15);
   assert.equal(report.score_breakdown.excluded.confidence, 1);
@@ -215,7 +215,11 @@ test('Supabase-only scans use client table fallback without web findings', async
     assert.equal(result.findings.some(finding => finding.title.includes('newsletter_subscribers') && finding.severity === 'ELEVEE'), true);
     assert.equal(result.score, 92);
     assert.equal(result.coverage.status, 'partial');
-    assert.deepEqual(result.coverage.limitations, ['supabase_schema_inventory_unavailable']);
+    assert.ok(result.coverage.limitations.includes('supabase_schema_inventory_unavailable'));
+    assert.ok(result.coverage.limitations.every((limitation) => [
+      'browser_crawl_unavailable',
+      'supabase_schema_inventory_unavailable',
+    ].includes(limitation)));
   } finally {
     await new Promise(resolve => server.close(resolve));
   }

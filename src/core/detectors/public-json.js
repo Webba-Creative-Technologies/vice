@@ -1,10 +1,10 @@
-import { isPlaceholderSecret } from '../../utils/patterns.js';
+import { isLikelyGenericSecret, isPlaceholderSecret } from '../../utils/patterns.js';
+import { redactSensitiveText } from '../redaction.js';
 
 const CREDENTIAL_KEYS = new Set([
   'password',
   'password_hash',
   'passwd',
-  'token',
   'access_token',
   'refresh_token',
   'api_key',
@@ -27,9 +27,6 @@ const PERSONAL_KEYS = new Set([
 const SENSITIVE_KEYS = new Set([
   'unsubscribe_token',
   'key_hash',
-  'key_prefix',
-  'permissions',
-  'scopes',
   'account_no',
   'balance',
   'bank_name',
@@ -38,6 +35,7 @@ const SENSITIVE_KEYS = new Set([
 ]);
 
 const PLACEHOLDERS = /^(?:redacted|masked|hidden|none|null|undefined|example|placeholder|changeme|\*+)$/i;
+const NON_CREDENTIAL_STATE = /^(?:disabled|enabled|not[-_ ]?(?:set|configured|available)|required|protected|available|true|false)$/i;
 
 function normalizedKey(key) {
   return String(key || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
@@ -50,6 +48,20 @@ function meaningfulValue(value) {
   if (/^(?:process\.env|import\.meta\.env|env\.)/i.test(text)) return false;
   if (isPlaceholderSecret(text)) return false;
   return true;
+}
+
+function looksLikeCredential(field, value) {
+  if (!meaningfulValue(value)) return false;
+  const text = String(value).trim();
+
+  if (field === 'password_hash') return /^\$(?:2[aby]|argon2)|^[a-f0-9]{32,}$/i.test(text) || text.length >= 40;
+  if (field === 'password' || field === 'passwd') return text.length >= 6 && !NON_CREDENTIAL_STATE.test(text);
+  if (field === 'private_key') return /BEGIN .*PRIVATE KEY|^[A-Za-z0-9+/=_-]{32,}$/.test(text);
+  if (redactSensitiveText(text) !== text) return true;
+  if (field === 'access_token' || field === 'refresh_token') {
+    return text.length >= 20 && (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text) || isLikelyGenericSecret(`${field}="${text}"`));
+  }
+  return isLikelyGenericSecret(`${field}="${text}"`);
 }
 
 function meaningfulSensitiveValue(value) {
@@ -74,7 +86,7 @@ function walk(value, path, state, depth = 0) {
     const field = normalizedKey(key);
     const fieldPath = path ? `${path}.${key}` : key;
 
-    if (CREDENTIAL_KEYS.has(field) && meaningfulValue(child)) {
+    if (CREDENTIAL_KEYS.has(field) && looksLikeCredential(field, child)) {
       state.credentials.add(fieldPath);
     }
     if (PERSONAL_KEYS.has(field) && meaningfulValue(child)) {

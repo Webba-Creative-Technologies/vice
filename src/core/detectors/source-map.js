@@ -69,7 +69,7 @@ export function analyzeSourceMap(text) {
 
   if (sensitiveSources.length > 0) {
     return {
-      severity: 'MOYENNE',
+      severity: 'INFO',
       kind: 'sensitive-sources',
       sourceCount: sources.length,
       embeddedSourceCount: sourceContents.length,
@@ -79,7 +79,7 @@ export function analyzeSourceMap(text) {
   }
 
   return {
-    severity: 'FAIBLE',
+    severity: 'INFO',
     kind: 'source-metadata',
     sourceCount: sources.length,
     embeddedSourceCount: sourceContents.length,

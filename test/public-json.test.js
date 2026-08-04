@@ -58,3 +58,13 @@ test('similar field names do not trigger sensitive classification', () => {
 
   assert.equal(result.kind, 'public-json');
 });
+
+test('ordinary token and permission metadata stays informational', () => {
+  const result = classifyPublicJson({ token: 'next-page', permissions: ['read'], scopes: ['catalog'] });
+  assert.equal(result.kind, 'public-json');
+});
+
+test('password capability states are not treated as credentials', () => {
+  const result = classifyPublicJson({ password: 'disabled', password_hash: 'not-set' });
+  assert.equal(result.kind, 'public-json');
+});

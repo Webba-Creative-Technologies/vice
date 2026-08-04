@@ -9,8 +9,9 @@ test('normal web ports produce no service finding', () => {
 });
 
 test('plaintext administration protocols remain actionable', () => {
-  assert.equal(classifyOpenService(23, '').severity, 'CRITIQUE');
-  assert.equal(classifyOpenService(21, '220 FTP').severity, 'ELEVEE');
+  assert.equal(classifyOpenService(23, 'Telnet service\nlogin:').severity, 'CRITIQUE');
+  assert.equal(classifyOpenService(21, '220 FTP service ready').severity, 'ELEVEE');
+  assert.equal(classifyOpenService(23, '').state, 'port-only');
 });
 
 test('database ports without protocol evidence stay heuristic', () => {
@@ -21,7 +22,7 @@ test('database ports without protocol evidence stay heuristic', () => {
 
 test('database protocol evidence raises confidence without claiming no auth', () => {
   const result = classifyOpenService(3306, '8.0 mysql_native_password');
-  assert.equal(result.severity, 'MOYENNE');
+  assert.equal(result.severity, 'INFO');
   assert.equal(result.state, 'protocol-confirmed');
 });
 
@@ -30,16 +31,16 @@ test('Redis distinguishes unauthenticated and protected responses', () => {
   assert.equal(classifyOpenService(6379, '-NOAUTH Authentication required.').severity, 'INFO');
 });
 
-test('Elasticsearch distinguishes access control from probable public HTTP', () => {
+test('Elasticsearch reachability remains informational without data exposure', () => {
   assert.equal(classifyOpenService(9200, 'HTTP/1.1 401 Unauthorized').severity, 'INFO');
-  assert.equal(classifyOpenService(9200, 'HTTP/1.1 200 OK\r\nx-elastic-product: Elasticsearch').severity, 'ELEVEE');
+  assert.equal(classifyOpenService(9200, 'HTTP/1.1 200 OK\r\nx-elastic-product: Elasticsearch').severity, 'INFO');
 });
 
 test('unknown admin ports remain low-confidence review signals', () => {
   const unknown = classifyOpenService(9000, '');
   const recognized = classifyOpenService(9090, 'HTTP/1.1 200 OK\r\nServer: Prometheus');
   assert.equal(unknown.confidence, 'low');
-  assert.equal(recognized.severity, 'MOYENNE');
+  assert.equal(recognized.severity, 'INFO');
 });
 
 test('HTTP-only subdomains require a live web response', () => {

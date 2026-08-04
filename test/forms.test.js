@@ -21,11 +21,17 @@ test('POST text forms are informational input surfaces', () => {
   assert.match(result.detail, /not proof/i);
 });
 
-test('missing CSRF field stays low confidence', () => {
+test('missing CSRF field is inconclusive without cookie and cross-site evidence', () => {
   const result = classifyCsrfEvidence({ method: 'POST', hasCSRF: false });
 
-  assert.equal(result.severity, 'FAIBLE');
-  assert.match(result.detail, /does not confirm/i);
+  assert.equal(result, null);
+});
+
+test('accepted cross-site cookie form remains actionable', () => {
+  const result = classifyCsrfEvidence({ method: 'POST', hasCSRF: false, usesCookieAuth: true, crossSiteAccepted: true });
+
+  assert.equal(result.severity, 'ELEVEE');
+  assert.equal(result.confidence, 'high');
 });
 
 test('explicit CSRF fields remain informational evidence', () => {

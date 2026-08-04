@@ -17,7 +17,7 @@ test('ordinary client source maps stay low severity', () => {
   }));
 
   assert.equal(result.kind, 'source-metadata');
-  assert.equal(result.severity, 'FAIBLE');
+  assert.equal(result.severity, 'INFO');
 });
 
 test('embedded credential material makes source maps critical', () => {
@@ -44,7 +44,7 @@ test('server source paths raise exposure severity without secrets', () => {
   }));
 
   assert.equal(result.kind, 'sensitive-sources');
-  assert.equal(result.severity, 'MOYENNE');
+  assert.equal(result.severity, 'INFO');
 });
 
 test('source maps ignore public credential identifiers', () => {

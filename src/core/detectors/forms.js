@@ -25,9 +25,15 @@ export function classifyCsrfEvidence(form) {
     };
   }
 
-  return {
-    severity: 'FAIBLE',
-    title: 'No explicit CSRF token detected',
-    detail: 'No token field was visible. This does not confirm a vulnerability because the application may enforce SameSite cookies, Origin checks, or custom headers.',
-  };
+  if (form?.usesCookieAuth && form?.crossSiteAccepted) {
+    return {
+      severity: 'ELEVEE',
+      title: 'Cross-site form submission accepted with cookie authentication',
+      detail: 'A cross-site state-changing request was accepted while authentication relied on cookies.',
+      classification: 'confirmed',
+      confidence: 'high',
+    };
+  }
+
+  return null;
 }

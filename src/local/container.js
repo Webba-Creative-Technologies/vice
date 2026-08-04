@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { addFinding } from '../core/findings.js';
+import { isLikelyGenericSecret, isPlaceholderSecret } from '../utils/patterns.js';
 
 function getLine(content, position) {
   return content.substring(0, position).split('\n').length;
@@ -26,13 +27,13 @@ function auditDockerfile(content, rel) {
     const tag = image.split(':')[1];
     const line = getLine(content, m.index);
     if (!tag) {
-      addFinding('LOW', 'Container', `FROM without explicit tag in ${rel}:${line}`,
+      addFinding('INFO', 'Container', `FROM without explicit tag in ${rel}:${line}`,
         `${m[0].trim()}\nNo tag specified - defaults to :latest, making builds non-reproducible.`,
         `Pin to a specific version: FROM ${image}:1.2.3 or use a digest.`,
         { file: rel, line }, 'high');
       issues++;
     } else if (tag === 'latest') {
-      addFinding('LOW', 'Container', `FROM uses :latest in ${rel}:${line}`,
+      addFinding('INFO', 'Container', `FROM uses :latest in ${rel}:${line}`,
         `${m[0].trim()}\nLatest tag changes silently and breaks reproducibility.`,
         `Pin to a specific version: FROM ${image.split(':')[0]}:1.2.3`,
         { file: rel, line }, 'high');
@@ -42,13 +43,7 @@ function auditDockerfile(content, rel) {
 
   // No USER directive (or runs as root)
   const userMatches = [...content.matchAll(/^USER\s+(\S+)/gim)];
-  if (userMatches.length === 0) {
-    addFinding('MEDIUM', 'Container', `No USER directive in ${rel}`,
-      `Container will run as root by default. Privilege escalation risk if the process is exploited.`,
-      `Add a non-root user: \n  RUN adduser -D appuser\n  USER appuser`,
-      { file: rel }, 'high');
-    issues++;
-  } else {
+  if (userMatches.length > 0) {
     const lastUser = userMatches[userMatches.length - 1];
     const userVal = lastUser[1].trim();
     if (userVal === '0' || userVal === 'root') {
@@ -76,8 +71,7 @@ function auditDockerfile(content, rel) {
   const envSecretRegex = /^ENV\s+(\w*(?:SECRET|PASSWORD|API[_-]?KEY|TOKEN|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)\w*)[\s=]+\S+/gim;
   while ((m = envSecretRegex.exec(content)) !== null) {
     const line = getLine(content, m.index);
-    // Skip if value is a placeholder
-    if (/your_|example|placeholder|xxx|changeme|\$\{/i.test(m[0])) continue;
+    if (isPlaceholderSecret(m[0]) || !isLikelyGenericSecret(m[0])) continue;
     addFinding('CRITICAL', 'Container', `Potential secret in ENV in ${rel}:${line}`,
       `ENV ${m[1]}=<redacted>\nSecrets baked into image layers are accessible to anyone with the image. They cannot be revoked from existing pulls.`,
       `Pass secrets at runtime instead: docker run -e SECRET=val (or use Docker/Compose secrets).`,
@@ -158,20 +152,20 @@ function auditCompose(content, rel) {
     const line = getLine(content, m.index);
     const dbPorts = [3306, 5432, 27017, 6379, 9200, 11211, 5984];
     const isDatabase = dbPorts.includes(port) || dbPorts.includes(containerPort);
-    const sev = isDatabase ? 'HIGH' : 'MEDIUM';
-    addFinding(sev, 'Container', `Service exposed on 0.0.0.0:${port} in ${rel}:${line}`,
-      `Host port ${port} publishes container port ${containerPort} on every network interface. ${isDatabase ? 'Database services should only be reachable on localhost or internal networks.' : 'Consider whether external exposure is intended.'}`,
-      `Bind to localhost: "127.0.0.1:${port}:${containerPort}" - or remove the host binding to keep it on the internal Compose network only.`,
-      { file: rel, line }, 'medium');
-    issues++;
+    if (isDatabase) {
+      addFinding('HIGH', 'Container', `Database service exposed on 0.0.0.0:${port} in ${rel}:${line}`,
+        `Host port ${port} publishes database port ${containerPort} on every network interface.`,
+        `Bind to localhost: "127.0.0.1:${port}:${containerPort}" or keep the service on the internal Compose network.`,
+        { file: rel, line }, 'high');
+      issues++;
+    }
   }
 
   // Hardcoded secrets in environment:
   const envSecretRegex = /^[ \t]+(?:-\s+)?(\w*(?:SECRET|PASSWORD|API[_-]?KEY|TOKEN|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)\w*)\s*[:=]\s*["']?([^"'\n${}]+)["']?/gim;
   while ((m = envSecretRegex.exec(content)) !== null) {
     const value = m[2].trim();
-    if (!value || value.length < 6) continue;
-    if (/your_|example|placeholder|xxx|changeme|\$\{/i.test(value)) continue;
+    if (!value || isPlaceholderSecret(`${m[1]}=${value}`) || !isLikelyGenericSecret(value)) continue;
     const line = getLine(content, m.index);
     addFinding('CRITICAL', 'Container', `Potential secret in environment in ${rel}:${line}`,
       `${m[1]}=<redacted>\nCommitted secrets in compose files are visible to anyone with repo access and history.`,

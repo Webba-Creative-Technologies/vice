@@ -17,9 +17,9 @@ export function classifySensitiveFile(path, body, mediaType = '') {
       return !isPlaceholderSecret(`${assignment[1]}=${assignment[2].trim()}`);
     });
     return {
-      severity: privateValue ? 'CRITIQUE' : 'MOYENNE',
+      severity: privateValue ? 'CRITIQUE' : 'INFO',
       confidence: 'high',
-      classification: privateValue ? 'confirmed' : 'probable',
+      classification: privateValue ? 'confirmed' : 'hardening',
       kind: privateValue ? 'environment secrets' : 'environment configuration',
     };
   }
@@ -43,7 +43,7 @@ export function classifySensitiveFile(path, body, mediaType = '') {
     try {
       const parsed = JSON.parse(value);
       if (!parsed || typeof parsed !== 'object' || !parsed.name || !('dependencies' in parsed || 'scripts' in parsed)) return null;
-      return { severity: 'FAIBLE', confidence: 'high', classification: 'hardening', kind: 'package manifest' };
+      return { severity: 'INFO', confidence: 'high', classification: 'hardening', kind: 'package manifest' };
     } catch {
       return null;
     }
@@ -56,7 +56,7 @@ export function classifySensitiveFile(path, body, mediaType = '') {
 
   if (/\.DS_Store$/i.test(path)) {
     if (!value.includes('Bud1')) return null;
-    return { severity: 'FAIBLE', confidence: 'high', classification: 'hardening', kind: 'directory metadata' };
+    return { severity: 'INFO', confidence: 'high', classification: 'hardening', kind: 'directory metadata' };
   }
 
   if (/\.htaccess$/i.test(path)) {

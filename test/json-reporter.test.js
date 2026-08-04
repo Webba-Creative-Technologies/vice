@@ -17,7 +17,7 @@ test('JSON reports expose engine, ruleset and scoring versions', async () => {
     const report = JSON.parse(await readFile(filename, 'utf8'));
 
     assert.equal(report.engine_version, '3.4.0');
-    assert.equal(report.ruleset_version, '2026.07.22.1');
+    assert.equal(report.ruleset_version, '2026.08.04.1');
     assert.equal(report.scoring_version, '2026.07.11.3');
   } finally {
     clearFindings();

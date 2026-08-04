@@ -22,10 +22,10 @@ test('credential fields remain critical', () => {
   assert.equal(result.severity, 'CRITIQUE');
 });
 
-test('sensitive table names raise otherwise generic reads', () => {
+test('profile table names do not raise otherwise generic reads', () => {
   const result = classifySupabaseRead('user_profiles', [{ id: 'user-1', theme: 'dark' }]);
 
-  assert.equal(result.severity, 'ELEVEE');
+  assert.equal(result.severity, 'INFO');
 });
 
 test('Supabase table discovery extracts client calls and REST paths', () => {
@@ -39,9 +39,9 @@ test('Supabase table discovery extracts client calls and REST paths', () => {
   assert.deepEqual(normalizeSupabaseSchemaTables(['/scripts', '/rpc/search_docs', '/bad-name']), ['scripts']);
 });
 
-test('purchases and API key tables are sensitive by name', () => {
-  assert.equal(classifySupabaseRead('purchases', [{ id: 'purchase-1' }]).severity, 'ELEVEE');
-  assert.equal(classifySupabaseRead('platform_api_keys', [{ id: 'key-1' }]).severity, 'ELEVEE');
+test('table names alone do not claim exposed sensitive fields', () => {
+  assert.equal(classifySupabaseRead('purchases', [{ id: 'purchase-1' }]).severity, 'INFO');
+  assert.equal(classifySupabaseRead('platform_api_keys', [{ id: 'key-1' }]).severity, 'MOYENNE');
 });
 
 test('fallback inventory covers common server-side sensitive tables', () => {

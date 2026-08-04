@@ -45,6 +45,7 @@ import { classifyUnauthenticatedApiResponse, findMassAssignmentSurfaces } from '
 import { classifyTraceResponse } from './src/core/detectors/http-methods.js';
 import { classifyWebSocketMessages, redactWebSocketUrl } from './src/core/detectors/websocket.js';
 import { resolveFirstPartyApiEndpoint } from './src/core/detectors/api-endpoint.js';
+import { isLikelyCatchAll, responseSnapshot } from './src/core/detectors/http-response.js';
 import { auditAiRag } from './src/core/ai-rag/audit.js';
 import { loadAiRagCliConfig } from './src/core/ai-rag/cli-config.js';
 
@@ -199,8 +200,38 @@ function severityColor(sev) {
 
 // ──────────── MODULE 1 : Crawl & Extract JS (Puppeteer) ────────────
 
+async function crawlWithHttpFallback(baseUrl, spinner, reportFindings) {
+  spinner.text = 'Using static HTTP crawl fallback...';
+  const response = await safeFetch(baseUrl, { cache: 'no-store' });
+  if (!response || response.status < 200 || response.status >= 400) throw new Error(`Unable to retrieve ${baseUrl}`);
+
+  const html = (await response.text()).slice(0, DISCOVERY_BUDGETS.sourceCharacters);
+  const sources = [html];
+  const scriptUrls = new Set();
+  const assetPattern = /<(?:script\b[^>]*\bsrc|link\b[^>]*\brel=["']modulepreload["'][^>]*\bhref)\s*=\s*["']([^"']+)["']/gi;
+  let match;
+  while ((match = assetPattern.exec(html)) !== null && scriptUrls.size < DISCOVERY_BUDGETS.scriptUrls) {
+    try { scriptUrls.add(new URL(match[1], baseUrl).href); } catch {}
+  }
+
+  for (const scriptUrl of scriptUrls) {
+    if (!await authorizeDiscoveredDestination(scriptUrl)) continue;
+    const scriptResponse = await safeFetch(scriptUrl);
+    if (!scriptResponse || scriptResponse.status !== 200) continue;
+    const source = await scriptResponse.text().catch(() => '');
+    if (source.length > 10) boundedPush(sources, source.slice(0, DISCOVERY_BUDGETS.sourceCharacters), DISCOVERY_BUDGETS.scriptSources);
+  }
+
+  getScanContext()?.limitations?.add('browser_crawl_unavailable');
+  if (reportFindings) {
+    addFinding('INFO', 'Coverage', 'Static crawl fallback used', 'The browser crawl was unavailable. Declared scripts were retrieved over HTTP, but rendered DOM and lazy-loaded resources may be incomplete.', 'Run the scan in an environment where Chromium can reach the target for full browser coverage.', { classification: 'confirmed', confidence: 'high', rule_id: 'vice/coverage/static-crawl-fallback' });
+  }
+  return { scripts: sources, html, pageUrls: [] };
+}
+
 async function crawlAndExtract(baseUrl, spinner, options = {}) {
   const reportFindings = options.reportFindings !== false;
+  const navigationTimeoutMs = Math.max(1000, Math.min(options.timeoutMs ?? 10000, 30000));
   spinner.text = 'Launching headless browser...';
 
   let browser;
@@ -208,7 +239,11 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
     browser = await launchBrowser();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Unable to launch browser: ${message}`);
+    try {
+      return await crawlWithHttpFallback(baseUrl, spinner, reportFindings);
+    } catch {
+      throw new Error(`Unable to launch browser: ${message}`);
+    }
   }
 
   const page = await createBrowserPage(browser, baseUrl, { authenticated: true });
@@ -216,6 +251,7 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
 
   // Intercept all JS requests loaded by the browser
   const scriptUrls = new Set();
+  const capturedScriptUrls = new Set();
   const pendingScriptReads = new Set();
   const scriptContents = [];
   const addScriptSource = source => boundedPush(
@@ -233,6 +269,7 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
           const text = await response.text().catch(() => '');
           if (text.length > 10) {
             addScriptSource(text);
+            capturedScriptUrls.add(url);
           }
         }
       }
@@ -252,11 +289,15 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
   // Navigate to the page
   spinner.text = 'Loading the page in the browser...';
   try {
-    await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await browser.close().catch(() => {});
-    throw new Error(`Unable to load ${baseUrl}: ${message}`);
+    try {
+      return await crawlWithHttpFallback(baseUrl, spinner, reportFindings);
+    } catch {
+      throw new Error(`Unable to load ${baseUrl}: ${message}`);
+    }
   }
 
   // Wait a bit for lazy-loaded scripts
@@ -300,12 +341,14 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
   });
   for (const scriptUrl of declaredScriptUrls) {
     if (!scriptUrls.has(scriptUrl) && !boundedAdd(scriptUrls, scriptUrl, DISCOVERY_BUDGETS.scriptUrls)) continue;
+    if (capturedScriptUrls.has(scriptUrl)) continue;
     if (!await authorizeDiscoveredDestination(scriptUrl)) continue;
     const scriptResponse = await safeFetch(scriptUrl);
     if (!scriptResponse || scriptResponse.status !== 200) continue;
     const text = await scriptResponse.text().catch(() => '');
     if (text.length > 10) {
       addScriptSource(text);
+      capturedScriptUrls.add(scriptUrl);
     }
   }
 
@@ -334,10 +377,11 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
           // Or key name suggests an auth token
           const tokenishKey = /token|jwt|access|refresh|bearer|auth|session|sid|api[_-]?key/i.test(key);
           if (!looksLikeJwt && !tokenishKey) continue;
-          addFinding('ELEVEE', 'Storage Security',
+          addFinding('INFO', 'Storage Security',
             `Auth token in ${where}: "${key}"`,
-            `Value: ${value.substring(0, 80)}${value.length > 80 ? '...' : ''}\nTokens kept in ${where} are readable by any script on the page. An XSS will exfiltrate them.`,
-            'Store auth tokens in HttpOnly cookies set by the server. Cookies with HttpOnly + Secure + SameSite=Strict cannot be read by JS.');
+            `A token-shaped value with ${value.length} character(s) is stored in ${where}. The value is omitted from the report. Client-side storage is readable by scripts running on the page.`,
+            'Prefer HttpOnly cookies for server-managed sessions. If client-side storage is required by the authentication provider, use a strict CSP and minimize third-party scripts.',
+            { classification: 'hardening', confidence: 'high', rule_id: 'vice/browser/token-in-web-storage' });
         }
       }
     }
@@ -496,7 +540,7 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
     spinner.text = `Crawling ${subPages.length} internal pages...`;
     for (const subUrl of subPages) {
       try {
-        await page.goto(subUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+        await page.goto(subUrl, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
         await new Promise(r => setTimeout(r, 2000));
         const subDom = await page.evaluate(limit => document.documentElement.innerHTML.slice(0, limit), DISCOVERY_BUDGETS.sourceCharacters);
         addScriptSource(subDom);
@@ -795,11 +839,16 @@ async function checkHeaders(baseUrl, spinner) {
   if (!res) return;
 
   const headers = res.headers;
+  const contentType = headers.get('content-type') || '';
+  const isHtmlDocument = /(?:text\/html|application\/xhtml\+xml)/i.test(contentType);
+  const isHttps = new URL(baseUrl).protocol === 'https:';
 
   // Missing security headers (CSP and X-Frame-Options excluded - handled by dedicated modules)
   for (const h of SECURITY_HEADERS) {
+    if (h.name === 'Strict-Transport-Security' && !isHttps) continue;
+    if (['Referrer-Policy', 'Permissions-Policy'].includes(h.name) && !isHtmlDocument) continue;
     if (!headers.get(h.name.toLowerCase())) {
-      addFinding(h.severity, 'Headers', `Missing security header: ${h.name}`, `The ${h.name} header is not present in the response`, `Add the ${h.name} header in the server configuration`);
+      addFinding('INFO', 'Headers', `Missing security header: ${h.name}`, `The ${h.name} header is not present on the inspected ${isHtmlDocument ? 'document' : 'response'}. This is a hardening observation, not proof of an exploitable vulnerability.`, `Add the ${h.name} header when it is applicable to this response.`, { classification: 'hardening', confidence: 'high', rule_id: `vice/headers/missing-${h.name.toLowerCase()}` });
     }
   }
 
@@ -813,7 +862,7 @@ async function checkHeaders(baseUrl, spinner) {
   for (const h of LEAK_HEADERS) {
     const val = headers.get(h.toLowerCase());
     if (val) {
-      addFinding('MOYENNE', 'Headers', `Information header exposed: ${h}`, `${h}: ${val}`, `Remove the ${h} header to avoid revealing the tech stack`);
+      addFinding('INFO', 'Headers', `Information header exposed: ${h}`, `${h}: ${val}`, `Remove the ${h} header when the implementation detail is not needed.`, { classification: 'hardening', confidence: 'high', rule_id: `vice/headers/exposed-${h.toLowerCase()}` });
     }
   }
 
@@ -1048,7 +1097,6 @@ async function auditAuthInjection(jsContents, spinner) {
 
   // Test with the anon key first
   const keysToTest = [{ key: anonKey, label: 'anon key' }];
-  if (serviceRoleKey) keysToTest.push({ key: serviceRoleKey, label: 'service_role key' });
 
   for (const { key, label } of keysToTest) {
     // Attempt via the auth schema
@@ -1421,7 +1469,7 @@ async function auditVps(spinner) {
       const banner = await grabBanner(ip, port);
 
       const signal = classifyOpenService(port, banner);
-      if (signal) {
+      if (signal && signal.state !== 'port-only') {
         addFinding(
           signal.severity,
           'VPS Audit',
@@ -1453,13 +1501,13 @@ async function auditVps(spinner) {
     const directHttp = await safeFetch(`http://${ip}`, { headers: { 'Host': ip } });
     if (directHttp && directHttp.status === 200) {
       const server = directHttp.headers.get('server') || '';
-      addFinding('ELEVEE', 'VPS Audit', `${ip} - direct HTTP access possible`, `Server responds to HTTP on the direct IP (Cloudflare/proxy bypass possible)${server ? `\nServer: ${server}` : ''}`, 'Configure the web server to refuse connections that do not come through the domain/proxy');
+      addFinding('INFO', 'VPS Audit', `${ip} - direct HTTP response observed`, `The server responds on the IP address${server ? `\nServer: ${server}` : ''}. This does not by itself prove a proxy bypass.`, 'If the origin should only be reachable through a proxy, verify its network allowlist.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/vps/direct-http' });
     }
 
     const directHttps = await safeFetch(`https://${ip}`, { headers: { 'Host': ip } });
     if (directHttps) {
       const server = directHttps.headers.get('server') || '';
-      addFinding('ELEVEE', 'VPS Audit', `${ip} - direct HTTPS access possible`, `Server responds to HTTPS on the direct IP${server ? `\nServer: ${server}` : ''}`, 'Configure nginx/Apache to block requests without a valid Host (default_server returning 444)');
+      addFinding('INFO', 'VPS Audit', `${ip} - direct HTTPS response observed`, `The server responds on the IP address${server ? `\nServer: ${server}` : ''}. This does not by itself prove a proxy bypass.`, 'If the origin should only be reachable through a proxy, verify its network allowlist.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/vps/direct-https' });
     }
   }
 }
@@ -1498,8 +1546,10 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       await new Promise(r => setTimeout(r, 6000));
 
       // Check if the iframe loaded
-      const frames = page.frames();
-      const iframeLoaded = frames.length > 1;
+      const targetOrigin = new URL(baseUrl).origin;
+      const iframeLoaded = page.frames().some((frame) => {
+        try { return new URL(frame.url()).origin === targetOrigin; } catch { return false; }
+      });
 
       // Check the headers of the original request
       const directRes = await safeFetch(baseUrl);
@@ -1510,7 +1560,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       if (!hasFrameProtection && iframeLoaded) {
         addFinding('MOYENNE', 'Clickjacking', 'Site embeddable in an iframe', `${baseUrl} can be embedded in an iframe.\nAn attacker could overlay a decoy page.`, 'Add the X-Frame-Options: DENY or Content-Security-Policy: frame-ancestors \'none\' header');
       } else if (!hasFrameProtection) {
-        addFinding('ELEVEE', 'Clickjacking', 'No anti-iframe protection detected', 'X-Frame-Options and CSP frame-ancestors headers are missing', 'Add X-Frame-Options: DENY and/or CSP frame-ancestors');
+        addFinding(classifyHardeningSignal('missing-frame-protection').severity, 'Clickjacking', 'No explicit anti-iframe header detected', 'X-Frame-Options and CSP frame-ancestors are absent, but iframe rendering was not confirmed.', 'Add X-Frame-Options or CSP frame-ancestors when the page must not be embedded.', { classification: 'hardening', confidence: 'high' });
       } else {
         addFinding('INFO', 'Clickjacking', 'Anti-clickjacking protection active', `X-Frame-Options: ${xfo || 'absent'}, CSP frame-ancestors: ${csp ? 'present' : 'absent'}`, '');
       }
@@ -1567,7 +1617,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
           // Check if the payload is reflected in the DOM without execution
           const bodyHtml = await page.content();
           if (bodyHtml.includes(payload)) {
-            addFinding('FAIBLE', 'XSS', `XSS payload reflected (not executed) via "${param}"`, `Payload: ${payload}\nThe payload is present in the page HTML but execution was blocked (CSP, encoding, or browser protection).\nThis is informational - the server reflects user input, but the payload did NOT execute.`, 'Escape user output server-side. Never insert unfiltered content into the DOM. The current CSP or encoding appears effective, but defense-in-depth is recommended.');
+            addFinding('INFO', 'XSS', `Input reflected without script execution via "${param}"`, `The canary input was present in the rendered HTML, but no script executed. Reflection alone is not an XSS vulnerability.`, 'Keep contextual output encoding in place and avoid raw HTML sinks.', { classification: 'heuristic', confidence: 'low', rule_id: 'vice/xss/reflection-only' });
             xssFound = true;
             break;
           }
@@ -1712,7 +1762,7 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
     const httpsUrl = baseUrl.startsWith('https') ? baseUrl : baseUrl.replace('http://', 'https://');
     const res = await safeFetch(httpsUrl);
     if (!res) {
-      addFinding('CRITIQUE', 'SSL/TLS', 'HTTPS not available', `${httpsUrl} does not respond over HTTPS`, 'Enable HTTPS with an SSL certificate (Let\'s Encrypt)');
+      addFinding('MOYENNE', 'SSL/TLS', 'HTTPS not available', `${httpsUrl} did not respond during the bounded HTTPS check.`, 'Verify HTTPS availability and certificate configuration.', { classification: 'probable', confidence: 'medium', rule_id: 'vice/tls/https-unavailable' });
     } else {
       // Check if HTTP is accessible without redirection
       const httpUrl = httpsUrl.replace('https://', 'http://');
@@ -1729,14 +1779,15 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       const hsts = res.headers.get('strict-transport-security') || '';
       if (hsts) {
         if (!hsts.includes('includeSubDomains')) {
-          addFinding('MOYENNE', 'SSL/TLS', 'HSTS without includeSubDomains', `HSTS: ${hsts}`, 'Add includeSubDomains to protect subdomains');
+          addFinding('INFO', 'SSL/TLS', 'HSTS without includeSubDomains', `HSTS: ${hsts}`, 'Consider includeSubDomains only when every subdomain supports HTTPS.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/tls/hsts-subdomains' });
         }
         if (!hsts.includes('preload')) {
-          addFinding('FAIBLE', 'SSL/TLS', 'HSTS without preload', `HSTS: ${hsts}`, 'Add preload and submit the domain on hstspreload.org for maximum protection');
+          addFinding('INFO', 'SSL/TLS', 'HSTS without preload', `HSTS: ${hsts}`, 'Consider preload only after validating all subdomains and the preload requirements.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/tls/hsts-preload' });
         }
         const maxAgeMatch = hsts.match(/max-age=(\d+)/);
         if (maxAgeMatch && parseInt(maxAgeMatch[1]) < 31536000) {
-          addFinding('MOYENNE', 'SSL/TLS', 'HSTS max-age too short', `max-age=${maxAgeMatch[1]} (${Math.floor(parseInt(maxAgeMatch[1])/86400)} days). Recommended: 31536000 (1 year)`, 'Increase max-age to at least 31536000');
+          const maxAge = parseInt(maxAgeMatch[1]);
+          addFinding(maxAge === 0 ? 'MOYENNE' : 'INFO', 'SSL/TLS', maxAge === 0 ? 'HSTS explicitly disabled' : 'HSTS max-age below one year', `max-age=${maxAge} (${Math.floor(maxAge / 86400)} days)`, maxAge === 0 ? 'Enable HSTS after confirming HTTPS coverage.' : 'Consider a longer max-age after validating HTTPS coverage.', { classification: maxAge === 0 ? 'confirmed' : 'hardening', confidence: 'high', rule_id: 'vice/tls/hsts-max-age' });
         }
       }
     }
@@ -1758,16 +1809,14 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       } else {
         for (const cookie of cookies) {
           const issues = [];
-          if (!cookie.httpOnly) issues.push('no HttpOnly (accessible via document.cookie - stealable by XSS)');
-          if (!cookie.secure) issues.push('no Secure (sent in plain HTTP - interceptable)');
-          if (cookie.sameSite === 'None' || !cookie.sameSite) issues.push(`SameSite=${cookie.sameSite || 'not set'} (vulnerable to CSRF)`);
-
-          // Sensitive cookies (session, auth, token)
           const isSensitive = /session|token|auth|jwt|sid|csrf|supabase/i.test(cookie.name);
+          if (!cookie.httpOnly) issues.push('HttpOnly is not set');
+          if (!cookie.secure && baseUrl.startsWith('https:')) issues.push('Secure is not set');
+          if (isSensitive && (cookie.sameSite === 'None' || !cookie.sameSite)) issues.push(`SameSite is ${cookie.sameSite || 'not set'}`);
 
           if (issues.length > 0) {
-            const sev = isSensitive ? 'CRITIQUE' : 'MOYENNE';
-            addFinding(sev, 'Cookie Security', `Cookie "${cookie.name}" vulnerable${isSensitive ? ' (SENSITIVE COOKIE)' : ''}`, `Domain: ${cookie.domain}\nIssues: ${issues.join(', ')}\nCookie value omitted from evidence.${isSensitive ? '\nThis cookie appears to be related to authentication, so theft could allow session hijacking.' : ''}`, `Add missing flags: ${!cookie.httpOnly ? 'HttpOnly ' : ''}${!cookie.secure ? 'Secure ' : ''}${!cookie.sameSite ? 'SameSite=Strict' : ''}`);
+            const sev = isSensitive ? 'ELEVEE' : 'INFO';
+            addFinding(sev, 'Cookie Security', `Cookie "${cookie.name}" is missing security attributes${isSensitive ? ' (sensitive name)' : ''}`, `Domain: ${cookie.domain}\nIssues: ${issues.join(', ')}\nCookie value omitted from evidence.`, isSensitive ? 'Set the missing attributes after validating the authentication flow.' : 'Review whether this client-readable cookie contains security-sensitive state.', { classification: isSensitive ? 'probable' : 'hardening', confidence: isSensitive ? 'medium' : 'high', rule_id: 'vice/cookies/missing-attributes' });
           }
         }
       }
@@ -1796,18 +1845,18 @@ async function auditAttackScenarios(baseUrl, jsContents, spinner) {
       if (!csp) {
         addFinding(classifyHardeningSignal('missing-csp').severity, 'CSP', 'No Content-Security-Policy', 'CSP is a defense-in-depth control that limits the impact of an existing injection flaw. Its absence does not prove that script injection is possible.', 'Add a strict CSP. Minimal example:\nContent-Security-Policy: default-src \'self\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data:; connect-src \'self\' https://*.supabase.co');
       } else {
-        // Analyze CSP weaknesses
-        if (csp.includes('unsafe-inline') && csp.includes('script-src')) {
-          addFinding('ELEVEE', 'CSP', 'CSP with unsafe-inline on script-src', `CSP: ${csp}\nunsafe-inline allows inline script execution - cancels CSP anti-XSS protection`, 'Remove unsafe-inline from script-src. Use nonces or hashes instead.');
+        const scriptDirective = csp.match(/(?:^|;)\s*(?:script-src|default-src)\s+([^;]+)/i)?.[1] || '';
+        if (/['"]unsafe-inline['"]/i.test(scriptDirective) && !/['"]nonce-|['"]sha(?:256|384|512)-|['"]strict-dynamic['"]/i.test(scriptDirective)) {
+          addFinding('INFO', 'CSP', 'CSP script policy allows unsafe-inline', `Script policy: ${scriptDirective}`, 'Prefer nonces or hashes for inline scripts.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/csp/unsafe-inline' });
         }
-        if (csp.includes('unsafe-eval')) {
-          addFinding('ELEVEE', 'CSP', 'CSP with unsafe-eval', `CSP: ${csp}\nunsafe-eval allows eval() and new Function() - injection vector`, 'Remove unsafe-eval. Refactor code that uses eval().');
+        if (/['"]unsafe-eval['"]/i.test(scriptDirective)) {
+          addFinding('INFO', 'CSP', 'CSP script policy allows unsafe-eval', `Script policy: ${scriptDirective}`, 'Remove unsafe-eval when application code no longer requires it.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/csp/unsafe-eval' });
         }
-        if (csp.includes('*') && !csp.includes('*.supabase')) {
-          addFinding('ELEVEE', 'CSP', 'CSP with wildcard (*)', `CSP: ${csp}\nThe wildcard allows loading from any domain`, 'Replace wildcards with specific domains.');
+        if (/(?:^|\s)\*(?:\s|$)/.test(scriptDirective)) {
+          addFinding('INFO', 'CSP', 'CSP script policy contains a wildcard source', `Script policy: ${scriptDirective}`, 'Replace the wildcard with the required script origins.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/csp/script-wildcard' });
         }
-        if (csp.includes('data:') && csp.includes('script-src')) {
-          addFinding('MOYENNE', 'CSP', 'CSP allows data: in script-src', `Allows executing scripts via data: URIs`, 'Remove data: from script-src');
+        if (/(?:^|\s)data:(?:\s|$)/i.test(scriptDirective)) {
+          addFinding('INFO', 'CSP', 'CSP script policy allows data URLs', `Script policy: ${scriptDirective}`, 'Remove data: from the script policy.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/csp/script-data' });
         }
       }
     }
@@ -2698,15 +2747,16 @@ async function detectStack(baseUrl, jsContents, spinner) {
           'WordPress': 'Use a security plugin to hide wp-content and wp-includes paths',
         };
 
-        const sev = exposedFrameworks.has(techName) ? 'MOYENNE' : 'INFO';
-        const cveLine = exposedFrameworks.has(techName)
-          ? `\nAn attacker can target known CVEs for ${techName}.`
-          : `\nHosting provider/server is identifiable - low impact, but minor info disclosure.`;
+        const versionExposed = headerSources.some(source => /\b\d+\.\d+(?:\.\d+)?\b/.test(source));
+        const sev = exposedFrameworks.has(techName) && versionExposed ? 'FAIBLE' : 'INFO';
+        const cveLine = versionExposed
+          ? `\nA concrete version is visible and can be compared with supported releases.`
+          : `\nThe product name is visible without a concrete vulnerable version.`;
         addFinding(sev, 'Stack Detection', `${techName} detectable via HTTP headers`, `${headerSources.join('\n')}${cveLine}`, how[techName] || `Remove or hide headers that reveal ${techName}`);
       }
 
       if (jsSources.length > 0 && !headerSources.length) {
-        addFinding('FAIBLE', 'Stack Detection', `${techName} detectable in client-side code`, `${jsSources.join('\n')}\nHard to fully hide in JS, but an attacker can use it to target specific vulnerabilities.`, 'Minimize direct references in code. Use production builds that strip framework names.');
+        addFinding('INFO', 'Stack Detection', `${techName} detectable in client-side code`, `${jsSources.join('\n')}\nClient frameworks are normally identifiable from public bundles.`, '', { classification: 'informational', confidence: 'high' });
       }
     }
   }
@@ -2727,7 +2777,7 @@ async function detectStack(baseUrl, jsContents, spinner) {
     for (const { name, regex } of versionPatterns) {
       const match = regex.exec(js);
       if (match) {
-        addFinding('FAIBLE', 'Stack Detection', `Version detected: ${name} ${match[1]}`, `Found in client-side code: "${match[0]}"`, `Exposed versions allow searching for known CVEs. Verify that ${name} ${match[1]} is up to date.`);
+        addFinding('INFO', 'Stack Detection', `Version detected: ${name} ${match[1]}`, `Found in client-side code: "${match[0]}"`, `Verify that ${name} ${match[1]} remains supported.`, { classification: 'informational', confidence: 'medium' });
       }
     }
   }
@@ -2735,7 +2785,7 @@ async function detectStack(baseUrl, jsContents, spinner) {
   // Meta generator
   const generatorMatch = html.match(/<meta[^>]*name=["']generator["'][^>]*content=["']([^"']+)["']/i);
   if (generatorMatch) {
-    addFinding('MOYENNE', 'Stack Detection', `Meta generator exposed: ${generatorMatch[1]}`, `<meta name="generator" content="${generatorMatch[1]}">`, 'Remove the meta generator tag in production');
+    addFinding('INFO', 'Stack Detection', `Meta generator exposed: ${generatorMatch[1]}`, `<meta name="generator" content="${generatorMatch[1]}">`, 'Remove the meta generator tag only when product disclosure conflicts with deployment policy.', { classification: 'hardening', confidence: 'high' });
   }
 }
 
@@ -2770,6 +2820,7 @@ async function scanSubdomains(baseUrl, spinner) {
   // 1. Certificate Transparency via crt.sh (passive, often catches non-obvious subdomains)
   // 2. Common-prefix bruteforce (catches subdomains that haven't issued certs)
   const candidates = new Set(commonSubs.map(s => `${s}.${baseDomain}`));
+  const certificateCandidates = new Set();
   let crtCount = 0;
 
   spinner.text = `Querying crt.sh for ${baseDomain}...`;
@@ -2788,6 +2839,7 @@ async function scanSubdomains(baseUrl, spinner) {
               candidates.add(clean);
               crtCount++;
             }
+            certificateCandidates.add(clean);
             if (candidates.size >= 300) break; // safety cap on huge cert sets
           }
           if (candidates.size >= 300) break;
@@ -2800,6 +2852,18 @@ async function scanSubdomains(baseUrl, spinner) {
   const { promisify } = await import('util');
   const resolve4 = promisify(dns.default.resolve4);
 
+  let wildcardAddresses = null;
+  try {
+    const nonce = Date.now().toString(36);
+    const probes = await Promise.all([
+      resolve4(`vice-nx-${nonce}-a.${baseDomain}`),
+      resolve4(`vice-nx-${nonce}-b.${baseDomain}`),
+    ]);
+    const first = [...new Set(probes[0])].sort();
+    const second = [...new Set(probes[1])].sort();
+    if (first.length > 0 && first.join(',') === second.join(',')) wildcardAddresses = first;
+  } catch {}
+
   const candidateList = [...candidates];
   const total = candidateList.length;
   const resolvedCandidates = await mapWithConcurrency(candidateList, 20, async (subdomain, index) => {
@@ -2807,6 +2871,12 @@ async function scanSubdomains(baseUrl, spinner) {
     try {
       const ips = await resolve4(subdomain);
       if (ips && ips.length > 0) {
+        const normalizedIps = [...new Set(ips)].sort();
+        if (
+          wildcardAddresses
+          && !certificateCandidates.has(subdomain)
+          && normalizedIps.join(',') === wildcardAddresses.join(',')
+        ) return null;
         return { subdomain, ips };
       }
     } catch {}
@@ -2815,7 +2885,7 @@ async function scanSubdomains(baseUrl, spinner) {
   const foundSubs = resolvedCandidates.filter(Boolean);
 
   if (foundSubs.length === 0) {
-    addFinding('INFO', 'Subdomains', 'No subdomain found', `${total} candidate(s) tested (${crtCount} from crt.sh, ${commonSubs.length} common prefixes)`, '');
+    addFinding('INFO', 'Subdomains', 'No subdomain found', `${total} candidate(s) tested (${crtCount} from crt.sh, ${commonSubs.length} common prefixes).${wildcardAddresses ? ' Wildcard DNS responses were excluded.' : ''}`, '');
     return;
   }
 
@@ -2846,10 +2916,8 @@ async function scanSubdomains(baseUrl, spinner) {
     const suspectSubs = ['admin', 'panel', 'dashboard', 'staging', 'stage', 'debug', 'studio', 'supabase'];
     const subName = subdomain.split('.')[0];
 
-    if (criticalSubs.includes(subName) && status === 200) {
-      addFinding('ELEVEE', 'Subdomains', `Infrastructure subdomain accessible: ${subdomain}`, `${protocol}://${subdomain} responds (status ${status})${server ? `\nServer: ${server}` : ''}${poweredBy ? `\nX-Powered-By: ${poweredBy}` : ''}\nIP: ${ips.join(', ')}`, `Restrict access to ${subdomain} by source IP, VPN, or authentication.`);
-    } else if (suspectSubs.includes(subName) && status === 200) {
-      addFinding('MOYENNE', 'Subdomains', `Sensitive subdomain accessible: ${subdomain}`, `${protocol}://${subdomain} responds (status ${status})${server ? `\nServer: ${server}` : ''}\nIP: ${ips.join(', ')}`, `Verify that ${subdomain} requires authentication.`);
+    if ((criticalSubs.includes(subName) || suspectSubs.includes(subName)) && status === 200) {
+      addFinding('INFO', 'Subdomains', `Named infrastructure subdomain responds: ${subdomain}`, `${protocol}://${subdomain} responds (status ${status})${server ? `\nServer: ${server}` : ''}${poweredBy ? `\nX-Powered-By: ${poweredBy}` : ''}\nIP: ${ips.join(', ')}. The hostname alone does not establish missing access control.`, `Verify that administrative functionality requires authentication.`, { classification: 'heuristic', confidence: 'low', rule_id: 'vice/subdomains/named-infrastructure' });
     }
 
     // Subdomain without HTTPS - skip subdomains named after non-HTTP protocols
@@ -2874,12 +2942,15 @@ async function auditDns(baseUrl, spinner) {
   const resolveMx = promisify(dns.default.resolveMx);
   const resolveCname = promisify(dns.default.resolveCname);
   const resolveNs = promisify(dns.default.resolveNs);
+  const isDnsAbsence = (error) => ['ENODATA', 'ENOTFOUND', 'NXDOMAIN'].includes(error?.code);
 
   // ── SPF ──
   spinner.text = 'Checking SPF...';
   let spfFound = false;
+  let spfLookupConclusive = false;
   try {
     const txtRecords = await resolveTxt(baseDomain);
+    spfLookupConclusive = true;
     for (const record of txtRecords) {
       const txt = record.join('');
       if (txt.includes('v=spf1')) {
@@ -2898,17 +2969,21 @@ async function auditDns(baseUrl, spinner) {
         addFinding('INFO', 'DNS / Email', 'DMARC configured on the main domain', `DMARC: ${txt}`, '');
       }
     }
-  } catch {}
+  } catch (error) {
+    spfLookupConclusive = isDnsAbsence(error);
+  }
 
-  if (!spfFound) {
+  if (spfLookupConclusive && !spfFound) {
     addFinding('MOYENNE', 'DNS / Email', 'No SPF record found', `The domain ${baseDomain} has no SPF record.\nSpoofed messages using @${baseDomain} are not rejected by an SPF policy.`, `Publish an SPF policy adapted to the actual sending providers, or v=spf1 -all when this domain never sends email.`, { classification: 'confirmed', confidence: 'high' });
   }
 
   // ── DMARC (check _dmarc subdomain) ──
   spinner.text = 'Checking DMARC...';
   let dmarcFound = false;
+  let dmarcLookupConclusive = false;
   try {
     const dmarcRecords = await resolveTxt(`_dmarc.${baseDomain}`);
+    dmarcLookupConclusive = true;
     for (const record of dmarcRecords) {
       const txt = record.join('');
       if (txt.includes('v=DMARC1')) {
@@ -2922,9 +2997,11 @@ async function auditDns(baseUrl, spinner) {
         }
       }
     }
-  } catch {}
+  } catch (error) {
+    dmarcLookupConclusive = isDnsAbsence(error);
+  }
 
-  if (!dmarcFound) {
+  if (dmarcLookupConclusive && !dmarcFound) {
     addFinding('MOYENNE', 'DNS / Email', 'No DMARC record found', `No DMARC policy is published on _dmarc.${baseDomain}.\nReceiving providers have no domain policy for handling spoofed messages.`, `Publish DMARC in monitoring mode first, then move to quarantine or reject after validating legitimate senders.`, { classification: 'confirmed', confidence: 'high' });
   }
 
@@ -2987,7 +3064,7 @@ async function auditDns(baseUrl, spinner) {
         try {
           await resolveAny(cname);
         } catch (err) {
-          if (err && (err.code === 'ENOTFOUND' || err.code === 'NXDOMAIN' || err.code === 'SERVFAIL')) {
+          if (err && (err.code === 'ENOTFOUND' || err.code === 'NXDOMAIN')) {
             domainResolves = false;
           }
         }
@@ -3002,38 +3079,40 @@ async function auditDns(baseUrl, spinner) {
   spinner.text = 'Checking DNSSEC...';
   try {
     const resolveAny = promisify(dns.default.resolve);
-    // dns.resolve(domain, 'DS') is supported in Node 18+
-    const dsRecords = await resolveAny(baseDomain, 'DS').catch(() => null);
+    const dsRecords = await resolveAny(baseDomain, 'DS');
     if (dsRecords && dsRecords.length > 0) {
       addFinding('INFO', 'DNS / Email', 'DNSSEC active (DS records present)', `${dsRecords.length} DS record(s) on ${baseDomain}`, '');
-    } else {
-      addFinding('FAIBLE', 'DNS / Email', 'DNSSEC not configured',
-        `No DS records found for ${baseDomain}.\nDNSSEC prevents DNS spoofing and cache poisoning attacks.`,
-        'Enable DNSSEC at your registrar. Most registrars (Cloudflare, OVH, Gandi, Namecheap) support it in 1-click.');
     }
-  } catch {}
+  } catch (error) {
+    if (isDnsAbsence(error)) {
+      addFinding('INFO', 'DNS / Email', 'DNSSEC not configured',
+        `No DS records found for ${baseDomain}.\nDNSSEC prevents DNS spoofing and cache poisoning attacks.`,
+        'Consider enabling DNSSEC at the registrar.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/dns/dnssec-missing' });
+    }
+  }
 
   // ── CAA records: limit which CAs can issue certs for the domain ──
   spinner.text = 'Checking CAA records...';
   try {
-    const resolveCaa = promisify(dns.default.resolveCaa || dns.default.resolve);
     let caaRecords;
     if (dns.default.resolveCaa) {
-      caaRecords = await dns.default.promises.resolveCaa(baseDomain).catch(() => null);
+      caaRecords = await dns.default.promises.resolveCaa(baseDomain);
     } else {
-      caaRecords = await new Promise((resolve) => {
-        dns.default.resolve(baseDomain, 'CAA', (err, records) => resolve(err ? null : records));
+      caaRecords = await new Promise((resolve, reject) => {
+        dns.default.resolve(baseDomain, 'CAA', (err, records) => err ? reject(err) : resolve(records));
       });
     }
     if (caaRecords && caaRecords.length > 0) {
       addFinding('INFO', 'DNS / Email', `CAA records configured (${caaRecords.length})`,
         `CAs allowed to issue: ${caaRecords.map(r => r.issue || r.issuewild || JSON.stringify(r)).join(', ')}`, '');
-    } else {
-      addFinding('FAIBLE', 'DNS / Email', 'No CAA records',
-        `Without CAA, any CA can issue a cert for ${baseDomain}.\nA compromised CA can issue rogue certs that browsers accept.`,
-        `Add a CAA record. Example for Let's Encrypt only:\n  ${baseDomain}. CAA 0 issue "letsencrypt.org"\n  ${baseDomain}. CAA 0 iodef "mailto:security@${baseDomain}"`);
     }
-  } catch {}
+  } catch (error) {
+    if (isDnsAbsence(error)) {
+      addFinding('INFO', 'DNS / Email', 'No CAA records',
+        `Without CAA, any CA can issue a cert for ${baseDomain}.\nA compromised CA can issue rogue certs that browsers accept.`,
+        `Consider adding a CAA record for the certificate authorities used by this domain.`, { classification: 'hardening', confidence: 'high', rule_id: 'vice/dns/caa-missing' });
+    }
+  }
 
   // ── MTA-STS: enforces TLS for inbound mail ──
   spinner.text = 'Checking MTA-STS...';
@@ -3084,12 +3163,12 @@ async function enumerateOpenApiEndpoints(specUrl, specBody, baseUrl, spinner) {
 
   for (const surface of findMassAssignmentSurfaces(spec)) {
     addFinding(
-      'MOYENNE',
+      'INFO',
       'API Audit',
       `Potential mass assignment surface: ${surface.method} ${surface.path}`,
       `Writable privileged field(s) declared by OpenAPI: ${surface.fields.join(', ')}. Schema presence does not prove missing server-side authorization.`,
       'Use explicit input DTOs and server-side allowlists. Never bind authorization, ownership, billing or verification fields directly from request bodies.',
-      { classification: 'heuristic', confidence: 'medium', rule_id: 'vice/api/mass-assignment-schema' },
+      { classification: 'heuristic', confidence: 'low', rule_id: 'vice/api/mass-assignment-schema' },
     );
   }
 
@@ -3162,6 +3241,19 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
   const commonApis = ['/api', '/api/v1', '/api/v2', '/api/users', '/api/auth', '/api/admin', '/api/config',
     '/api/health', '/api/status', '/api/debug', '/api/graphql', '/graphql', '/api/docs', '/api/swagger'];
   const apiEndpoints = new Set(commonApis.map(path => origin + path));
+  const baselineResponses = [];
+
+  for (const baselineUrl of [baseUrl, `${origin}/vice-api-probe-not-found-${Date.now()}`]) {
+    const baselineRes = await safeFetch(baselineUrl, { cache: 'no-store' });
+    if (!baselineRes) continue;
+    let baselineBody = '';
+    try { baselineBody = await baselineRes.text(); } catch {}
+    baselineResponses.push(responseSnapshot(
+      baselineRes.status,
+      baselineRes.headers.get('content-type'),
+      baselineBody,
+    ));
+  }
 
   apiDiscovery:
   for (const js of jsContents) {
@@ -3204,8 +3296,11 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
     let body = '';
     try { body = await res.text(); } catch {}
 
+    const endpointSnapshot = responseSnapshot(status, contentType, body);
+    if (isLikelyCatchAll(endpointSnapshot, baselineResponses)) continue;
+
     // Ignore HTML pages (SPA catch-all)
-    if (contentType.includes('text/html') && body.length > 1000) continue;
+    if (contentType.includes('text/html')) continue;
 
     // API responding with data
     if (status === 200 && contentType.includes('json')) {
@@ -3235,7 +3330,7 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
     if (/debug|health|status|config/i.test(endpoint) && status === 200 && body.length > 10) {
       const hasInternal = /version|uptime|memory|cpu|database|connection|env|node_env|port|host/i.test(body);
       if (hasInternal) {
-        addFinding('ELEVEE', 'API Audit', `Debug/status endpoint exposes internal info: ${endpoint}`, `Response: ${body.substring(0, 300)}`, 'Protect or disable debug endpoints in production');
+        addFinding('INFO', 'API Audit', `Operational metadata is public: ${endpoint}`, 'The response includes operational field names such as version, uptime or environment. No credential or personal data was identified.', 'Remove fields that are not intended for public monitoring.', { classification: 'hardening', confidence: 'high', rule_id: 'vice/api/operational-metadata' });
       }
     }
 
@@ -3260,6 +3355,7 @@ async function auditApiEndpoints(baseUrl, jsContents, spinner) {
     if (sqlRes) {
       let sqlBody = '';
       try { sqlBody = await sqlRes.text(); } catch {}
+      if (isLikelyCatchAll(responseSnapshot(sqlRes.status, sqlRes.headers.get('content-type'), sqlBody), baselineResponses)) continue;
       // Use specific SQL error signatures rather than the bare word "sql" or
       // "query" (which match any documentation page or generic error text).
       const sqlErrorRegex = /(?:You have an error in your SQL syntax|Warning:\s+mysqli?_|near\s+'[^']*'\s+at line\s+\d+|Unknown column\s+'[^']+'|MySQLSyntaxErrorException|pq:\s+ERROR|ERROR:.*?at character\s+\d+|LINE\s+\d+:\s|unterminated quoted string at or near|relation\s+"[^"]+"\s+does not exist|column\s+"[^"]+"\s+does not exist|syntax error at or near\s+"|sqlite3?\.OperationalError|near\s+"[^"]+":\s+syntax error|unrecognized token:|no such table:|no such column:|ORA-\d{5}|microsoft (?:sql|ole db|odbc)|sqlclient|system\.data\.sqlclient|SQLSTATE\[\d+\])/i;
@@ -3356,6 +3452,7 @@ async function auditStorage(jsContents, spinner) {
   ]);
   // Track buckets explicitly marked public via the bucket API
   const knownPublicBuckets = new Set();
+  const sensitiveFileName = (name) => /(?:^|[._-])(?:invoice|facture|contract|passport|id_card|resume|bank|payment|secret|private|backup|export|dump)(?:[._-]|$)/i.test(String(name || ''));
 
   // Test Supabase buckets
   if (supabaseUrl && anonKey) {
@@ -3411,7 +3508,7 @@ async function auditStorage(jsContents, spinner) {
 
         if (Array.isArray(files) && files.length > 0) {
           const fileNames = files.map(f => f.name).filter(Boolean).slice(0, 10);
-          const hasPrivateData = /invoice|facture|contrat|contract|passport|id_card|cv|resume|bank|payment|secret|private|backup|export|dump/i.test(fileNames.join(' '));
+          const hasPrivateData = fileNames.some(sensitiveFileName);
           const isExpectedPublic = knownPublicBuckets.has(bucket) || PUBLIC_BY_CONVENTION.has(bucket.toLowerCase());
 
           if (hasPrivateData) {
@@ -3421,7 +3518,7 @@ async function auditStorage(jsContents, spinner) {
             // Public bucket with non-sensitive content: this is the intended setup
             addFinding('INFO', 'Storage', `Bucket "${bucket}" listable (public bucket, ${files.length} file(s))`, `Files: ${fileNames.join(', ')}\nBucket is marked public or named by a public-by-convention pattern.`, '');
           } else {
-            addFinding('MOYENNE', 'Storage', `Bucket "${bucket}" listable with anon key (${files.length} file(s))`, `Files: ${fileNames.join(', ')}`, `Check if the content of bucket "${bucket}" should be public. If not, restrict access.`);
+            addFinding('INFO', 'Storage', `Bucket "${bucket}" listable with anon key (${files.length} file(s))`, `Files: ${fileNames.join(', ')}`, `Verify that listing is intentional for this bucket.`, { classification: 'confirmed', confidence: 'high', rule_id: 'vice/storage/anonymous-listing' });
           }
 
           // Test direct file access (only flag if bucket is NOT expected public)
@@ -3432,7 +3529,8 @@ async function auditStorage(jsContents, spinner) {
               const fileRes = await safeFetch(fileUrl);
               if (fileRes && fileRes.status === 200) {
                 const ct = fileRes.headers.get('content-type') || '';
-                addFinding('MOYENNE', 'Storage', `File publicly accessible: ${bucket}/${file.name}`, `URL: ${fileUrl}\nContent-Type: ${ct}`, '');
+                const sensitive = sensitiveFileName(file.name);
+                addFinding(sensitive ? 'ELEVEE' : 'INFO', 'Storage', `File publicly accessible: ${bucket}/${file.name}`, `URL: ${fileUrl}\nContent-Type: ${ct}`, sensitive ? 'Move sensitive files to a private bucket and enforce object policies.' : '', { classification: 'confirmed', confidence: 'high', rule_id: sensitive ? 'vice/storage/public-sensitive-file' : 'vice/storage/public-file' });
               }
             }
           }
@@ -3449,7 +3547,8 @@ async function auditStorage(jsContents, spinner) {
       spinner.text = `Testing S3 bucket: ${url.substring(0, 60)}...`;
       const res = await safeFetch(url);
       if (res && res.status === 200) {
-        addFinding('MOYENNE', 'Storage', `S3 file publicly accessible`, `URL: ${url}`, 'Check the S3 bucket ACLs and bucket policies');
+        const sensitive = sensitiveFileName(new URL(url).pathname);
+        addFinding(sensitive ? 'ELEVEE' : 'INFO', 'Storage', `S3 file publicly accessible`, `URL: ${url}`, sensitive ? 'Move sensitive files to a private bucket and review its bucket policy.' : '', { classification: 'confirmed', confidence: 'high', rule_id: sensitive ? 'vice/storage/public-sensitive-s3-file' : 'vice/storage/public-s3-file' });
       }
     }
   }
@@ -3822,10 +3921,10 @@ async function testGraphQLEndpoint(endpoint, spinner) {
     try { parsedDepth = JSON.parse(depthBody); } catch {}
     const depthResult = classifyGraphqlDepthResponse(parsedDepth, deepRes.status);
     if (depthResult?.kind === 'accepted') {
-      addFinding('MOYENNE', 'GraphQL', `Deep GraphQL query accepted on ${endpoint}`,
-        'Server returned data for a valid 15-level recursive type query without a depth or complexity rejection.',
-        'Apply a query depth or cost policy appropriate to the production schema.',
-        { classification: 'confirmed', confidence: 'high', rule_id: 'vice/graphql/deep-query-accepted' });
+      addFinding('INFO', 'GraphQL', `Deep GraphQL query accepted on ${endpoint}`,
+        'The server returned data for a recursive introspection query. This does not prove that expensive application resolvers are unbounded.',
+        'Apply a query cost policy when the schema exposes expensive resolvers.',
+        { classification: 'hardening', confidence: 'high', rule_id: 'vice/graphql/deep-query-accepted' });
     } else if (depthResult?.kind === 'protected') {
       addFinding('INFO', 'GraphQL', `Query depth protection detected on ${endpoint}`,
         'The server rejected the deep query with an explicit depth or complexity limit.', '');
@@ -3894,16 +3993,19 @@ async function testGraphQLEndpoint(endpoint, spinner) {
 // ──────────── MODULE 18 : WordPress Specifics ────────────
 
 async function auditWordPress(baseUrl, jsContents, spinner) {
-  // Detect WordPress via markers in HTML/JS - skip silently if not WP
-  const allContent = jsContents.join('\n');
-  const wpDetected = /wp-content\/|wp-includes\/|wp-json|wordpress/i.test(allContent);
+  const origin = new URL(baseUrl).origin;
+  const homeRes = await safeFetch(baseUrl);
+  let homeBody = '';
+  try { homeBody = homeRes ? await homeRes.text() : ''; } catch {}
+  const allContent = `${homeBody.slice(0, 512000)}\n${jsContents.join('\n')}`;
+  const wpDetected = /(?:\/wp-content\/|\/wp-includes\/|<meta[^>]+generator[^>]+WordPress|rel=["']https:\/\/api\.w\.org\/["'])/i.test(allContent)
+    || /\/xmlrpc\.php/i.test(homeRes?.headers?.get('x-pingback') || '');
   if (!wpDetected) {
     addFinding('INFO', 'WordPress', 'WordPress not detected on target', '', '');
     return;
   }
 
   addFinding('INFO', 'WordPress', 'WordPress detected - running WP-specific checks', '', '');
-  const origin = new URL(baseUrl).origin;
 
   // 1. User enumeration via ?author=N (redirects to /author/{username}/)
   spinner.text = 'WordPress: enumerating users via ?author=N...';
@@ -3949,7 +4051,7 @@ async function auditWordPress(baseUrl, jsContents, spinner) {
   if (xmlrpcRes && (xmlrpcRes.status === 200 || xmlrpcRes.status === 405)) {
     let body = '';
     try { body = await xmlrpcRes.text(); } catch {}
-    const isActive = /XML-RPC server accepts POST requests only|methodCall/i.test(body) || xmlrpcRes.status === 405;
+    const isActive = /XML-RPC server accepts POST requests only|<methodCall>|<methodResponse>/i.test(body);
     if (isActive) {
       const signal = classifyWordpressSurface('xmlrpc');
       addFinding(signal.severity, 'WordPress',
@@ -3964,12 +4066,16 @@ async function auditWordPress(baseUrl, jsContents, spinner) {
   spinner.text = 'WordPress: testing wp-login.php...';
   const loginRes = await safeFetch(`${origin}/wp-login.php`);
   if (loginRes && loginRes.status === 200) {
-    const signal = classifyWordpressSurface('default-login');
-    addFinding(signal.severity, 'WordPress',
-      'wp-login.php at default path',
-      'The standard WordPress login path is reachable. This is normal and does not prove weak authentication.',
-      'Use MFA, strong passwords and rate limiting instead of relying on a hidden login URL.',
-      { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/wordpress/default-login' });
+    let loginBody = '';
+    try { loginBody = await loginRes.text(); } catch {}
+    if (/\bid=["']loginform["']|\bname=["']wp-submit["']|wp-login\.php\?action=/i.test(loginBody)) {
+      const signal = classifyWordpressSurface('default-login');
+      addFinding(signal.severity, 'WordPress',
+        'wp-login.php at default path',
+        'The standard WordPress login path is reachable. This is normal and does not prove weak authentication.',
+        'Use MFA, strong passwords and rate limiting instead of relying on a hidden login URL.',
+        { classification: signal.classification, confidence: signal.confidence, rule_id: 'vice/wordpress/default-login' });
+    }
   }
 
   // 5. wp-cron.php (DoS amplifier on shared hosting)
@@ -4353,7 +4459,10 @@ async function runScanInternal(config, httpClient, context) {
 
   if (modules.includes('js') || modules.includes('supabase') || modules.includes('authinjection') || modules.includes('api') || modules.includes('storage') || modules.includes('websocket')) {
     await executeStep('crawl', async (spinner) => {
-      const result = await crawlAndExtract(baseUrl, spinner, { reportFindings: modules.includes('js') });
+      const result = await crawlAndExtract(baseUrl, spinner, {
+        reportFindings: modules.includes('js'),
+        timeoutMs: config.requestTimeoutMs,
+      });
       jsContents = result.scripts;
     });
   }
@@ -4463,6 +4572,7 @@ async function runScanInternal(config, httpClient, context) {
   scanMetrics.browser = { ...context.browserMetrics };
   scanMetrics.scope = context.scope.metrics();
   const limitations = [];
+  if (context.limitations?.size) limitations.push(...context.limitations);
   if (scanMetrics.network.budget_exhausted) limitations.push('network_budget_exhausted');
   if (scanMetrics.scope.budget_exhausted) limitations.push('dns_budget_exhausted');
   if (modules.includes('supabase') && supabaseAudit?.inventoryComplete === false) limitations.push('supabase_schema_inventory_unavailable');

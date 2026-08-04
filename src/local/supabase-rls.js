@@ -47,6 +47,15 @@ export async function auditSupabaseRls(projectPath, spinner) {
     return;
   }
 
+  const sqlSources = [];
+  for (const filePath of sqlFiles) {
+    sqlSources.push({ filePath, content: await fs.promises.readFile(filePath, 'utf-8') });
+  }
+
+  const isSupabaseDirectory = path.resolve(migrationDir) === path.resolve(projectPath, 'supabase', 'migrations');
+  const hasSupabaseSql = sqlSources.some(({ content }) => /\bauth\.uid\s*\(|\b(?:anon|authenticated|service_role)\b|\bstorage\.objects\b|\bsupabase\b/i.test(content));
+  if (!isSupabaseDirectory && !hasSupabaseSql) return;
+
   spinner.text = `Analyzing ${sqlFiles.length} SQL files...`;
 
   const tablesCreated = new Map();
@@ -55,8 +64,7 @@ export async function auditSupabaseRls(projectPath, spinner) {
   const activeGrants = new Map();
   const functions = new Map();
 
-  for (const filePath of sqlFiles) {
-    const content = await fs.promises.readFile(filePath, 'utf-8');
+  for (const { filePath, content } of sqlSources) {
     const rel = path.relative(projectPath, filePath);
 
     const createTableRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?["']?(\w+)["']?/gi;
@@ -131,7 +139,7 @@ export async function auditSupabaseRls(projectPath, spinner) {
     if (rlsState.get(table) !== true) {
       addFinding('CRITICAL', 'Supabase RLS', `Table "${table}" created without RLS`, `Defined in ${file}\nNo ALTER TABLE ... ENABLE ROW LEVEL SECURITY found`, `Add after table creation:\n  ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;\n  CREATE POLICY "${table}_select" ON ${table} FOR SELECT USING (auth.uid() = user_id);`);
     } else if ((policiesByTable.get(table)?.size || 0) === 0) {
-      addFinding('HIGH', 'Supabase RLS', `Table "${table}" has RLS enabled but no policies`, 'RLS is on but without policies, NO data is accessible (even for authorized users)', `Add policies:\n  CREATE POLICY "${table}_read" ON ${table} FOR SELECT USING (auth.uid() = user_id);`);
+      addFinding('INFO', 'Supabase RLS', `Table "${table}" has RLS enabled with deny-by-default access`, 'No policy was found, so client roles cannot access rows through the Supabase API.', 'Add a policy only if client access to this table is intended.', { file }, 'high', { rule_id: 'vice/supabase/rls-deny-by-default', classification: 'confirmed' });
     }
   }
 

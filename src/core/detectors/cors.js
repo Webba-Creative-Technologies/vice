@@ -21,9 +21,9 @@ export function classifyCorsPolicy({ requestOrigin, allowOrigin, allowCredential
 
     return {
       kind: 'reflected-origin',
-      severity: 'MOYENNE',
+      severity: 'INFO',
       title: 'Arbitrary CORS origin reflected',
-      detail: `The server reflects ${requested}. Cross-origin scripts can read responses that do not require credentials.`,
+      detail: `The server reflects ${requested} without credentials. This can be intentional for public responses.`,
     };
   }
 

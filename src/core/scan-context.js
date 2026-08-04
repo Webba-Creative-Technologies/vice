@@ -10,6 +10,7 @@ export function createScanContext(options = {}) {
     scope: options.scope || null,
     signal: options.signal || null,
     browsers: new Set(),
+    limitations: new Set(),
     browserMetrics: { allowed: 0, blocked: 0, auth_injected: 0, mutations_blocked: 0 },
   };
 }

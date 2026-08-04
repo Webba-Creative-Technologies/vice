@@ -4,7 +4,11 @@ const SIGNALS = Object.freeze({
     category: 'hardening',
   },
   'missing-sri': {
-    severity: 'FAIBLE',
+    severity: 'INFO',
+    category: 'hardening',
+  },
+  'missing-frame-protection': {
+    severity: 'INFO',
     category: 'hardening',
   },
   'public-source-map': {

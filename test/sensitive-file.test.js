@@ -11,7 +11,7 @@ test('sensitive file detector confirms private environment values', () => {
 
 test('sensitive file detector lowers public environment configuration', () => {
   const result = classifySensitiveFile('/.env.production', 'PUBLIC_SITE_NAME=VICE\nPUBLIC_THEME=dark', 'text/plain');
-  assert.equal(result.severity, 'MOYENNE');
+  assert.equal(result.severity, 'INFO');
 });
 
 test('sensitive file detector does not confirm placeholder secrets', () => {
@@ -24,9 +24,9 @@ test('sensitive file detector does not confirm placeholder secrets', () => {
     'text/plain',
   );
 
-  assert.equal(result.severity, 'MOYENNE');
+  assert.equal(result.severity, 'INFO');
   assert.equal(result.kind, 'environment configuration');
-  assert.equal(result.classification, 'probable');
+  assert.equal(result.classification, 'hardening');
 });
 
 test('sensitive file detector rejects SPA and fake responses', () => {
@@ -37,7 +37,7 @@ test('sensitive file detector rejects SPA and fake responses', () => {
 
 test('package manifest is hardening rather than high severity', () => {
   const result = classifySensitiveFile('/package.json', '{"name":"demo","scripts":{"start":"node app.js"}}', 'application/json');
-  assert.equal(result.severity, 'FAIBLE');
+  assert.equal(result.severity, 'INFO');
   assert.equal(result.classification, 'hardening');
 });
 

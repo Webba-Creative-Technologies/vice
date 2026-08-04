@@ -58,7 +58,7 @@ export function classifyUnauthenticatedApiResponse(path, payload, status = 200) 
     return { severity: 'ELEVEE', confidence: 'high', classification: 'confirmed', kind: 'personal-data', paths: exposure.paths };
   }
   if (/\/(?:admin|internal|debug|config|users?|accounts?)\b/i.test(path)) {
-    return { severity: 'MOYENNE', confidence: 'medium', classification: 'probable', kind: 'sensitive-route', paths: [] };
+    return { severity: 'INFO', confidence: 'low', classification: 'heuristic', kind: 'sensitive-route', paths: [] };
   }
   return { severity: 'INFO', confidence: 'high', classification: 'confirmed', kind: 'public-data', paths: [] };
 }

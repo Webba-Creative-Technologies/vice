@@ -1,6 +1,10 @@
 node_modules/
 scans/
 .env*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.*.sample
 .vice-accepted
 *.log
 *.tgz
