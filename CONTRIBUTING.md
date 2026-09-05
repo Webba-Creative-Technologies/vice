@@ -37,7 +37,7 @@ addFinding(
 
 - Always provide a concrete fix recommendation
 - Test on real projects before submitting
-- Keep false positives low — precision over recall
+- Keep false positives low - precision over recall
 - French severity levels: CRITIQUE, ELEVEE, MOYENNE, FAIBLE, INFO
 
 ## Code style

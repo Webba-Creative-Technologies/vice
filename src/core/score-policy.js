@@ -1,4 +1,3 @@
-// Pure presentation policy. Numeric scoring and CI thresholds are unchanged.
 export const SCORE_PRESENTATION_VERSION = '2026.09.05.1';
 
 /** @param {number | null | undefined} score */
@@ -32,4 +31,3 @@ export function scorePresentation(score, options = {}) {
     : status === 'clear' ? 'success' : 'warning';
   return { grade, status, tone, provisional, critical, version: SCORE_PRESENTATION_VERSION };
 }
-

@@ -18,7 +18,7 @@
   <a href="https://www.npmjs.com/package/vice-security"><img src="https://img.shields.io/npm/v/vice-security?color=%23995ff6&label=npm" alt="npm"></a>
   <a href="#github-action"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Webba-Creative-Technologies/vice/main/.github/vice-badge.json" alt="VICE Security"></a>
   <a href="https://github.com/Webba-Creative-Technologies/vice/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node">
+  <img src="https://img.shields.io/badge/node-%3E%3D22.12-green" alt="Node">
   <img src="https://img.shields.io/badge/modules-27-995ff6" alt="Modules">
 </p>
 
@@ -37,6 +37,11 @@ Built by [Webba Creative Technologies](https://webba-creative.com).
 <br>
 
 ## Quick start
+
+Node.js 22.12 or later is required. Version 3.4.1 updates the browser dependency
+to remove a vulnerable archive extractor. Upgrade Node before updating VICE.
+Chromium remains optional for local audits; remote scans need it for full
+browser coverage. An HTTP fallback is reported as incomplete coverage.
 
 ```bash
 # Install globally
@@ -96,9 +101,9 @@ That's it. The action installs VICE, audits your code, comments on every PR with
 
 The workflow needs three permissions:
 
-- `contents: write` — to commit the badge file on push events
-- `pull-requests: write` — to post and update PR comments
-- `security-events: write` — to upload SARIF findings to GitHub Code Scanning (Security tab)
+- `contents: write` - to commit the badge file on push events
+- `pull-requests: write` - to post and update PR comments
+- `security-events: write` - to upload SARIF findings to GitHub Code Scanning (Security tab)
 
 ### Inputs
 
@@ -421,6 +426,28 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. In short: fork, branch, P
 <br>
 
 ## Changelog
+
+### v3.4.1
+
+Analytics detection now requires a recognized provider script. Generic words,
+documentation and unused strings no longer identify Google Analytics, Segment
+or Crisp. Google Tag Manager is reported separately from Google Analytics.
+Evidence identifies the source file and position, with a short source hash;
+URL credentials, query parameters and fragments are omitted. A declared script
+is distinguished from an observed response, and neither proves tracking activity.
+Self-hosted or server-side analytics without a recognized public loader may not
+be identified.
+
+Reports and badges consistently flag critical findings and incomplete coverage.
+The numeric scoring model and existing scan profiles are unchanged. Explicit
+DNS check outcomes provide evidence for later SPF and DMARC comparisons.
+
+Puppeteer is updated to 25.10.0, removing the vulnerable archive extraction
+chain. Node.js 22.12 or later is now required. Local audits can run without
+installing the optional browser dependency.
+
+The GitHub Action uses locked dependencies and a supported Node runtime, avoids
+shell interpolation of user inputs and applies the shared score presentation.
 
 ### v3.4.0
 

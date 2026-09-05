@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 
-// This proof only covers the missing-policy finding, not overall email security.
 export function dnsPolicyOutcome(kind, domain, records, error = null) {
   if (!['spf', 'dmarc'].includes(kind)) throw new Error('invalid_dns_policy_kind');
   const key = `dns-${kind}-presence-v1:${createHash('sha256').update(String(domain).toLowerCase()).digest('hex')}`;

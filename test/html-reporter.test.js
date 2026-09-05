@@ -36,7 +36,7 @@ test('HTML reporter escapes finding content and includes a restrictive CSP', asy
     assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
     assert.match(html, /Evidence &amp; &quot;quoted&quot; &lt;iframe/);
     assert.match(html, /Content-Security-Policy/);
-    assert.match(html, /VICE<\/a> v3\.4\.0/);
+    assert.match(html, /VICE<\/a> v3\.4\.1/);
     assert.match(html, /default-src 'none'/);
   } finally {
     clearFindings();

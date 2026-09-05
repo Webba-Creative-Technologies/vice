@@ -77,7 +77,7 @@ test('public CLI emits standalone JSON and SARIF reports', () => {
     const jsonResult = runCli(['audit', fixture.project, '--ci', '--json', '--min-score', '0', '--no-baseline'], fixture.home);
     assert.equal(jsonResult.status, 0, jsonResult.stderr);
     const report = JSON.parse(jsonResult.stdout);
-    assert.equal(report.version, '3.4.0');
+    assert.equal(report.version, '3.4.1');
     assert.equal(report.target, fixture.project);
     assert.equal(typeof report.score, 'number');
     assert.ok(Array.isArray(report.findings));
@@ -87,14 +87,14 @@ test('public CLI emits standalone JSON and SARIF reports', () => {
     assert.equal(sarifResult.status, 0, sarifResult.stderr);
     const sarif = JSON.parse(readFileSync(sarifPath, 'utf8'));
     assert.equal(sarif.version, '2.1.0');
-    assert.equal(sarif.runs[0].tool.driver.version, '3.4.0');
+    assert.equal(sarif.runs[0].tool.driver.version, '3.4.1');
 
     const historySarif = buildSarif([{
       severity: 'HIGH',
       module: 'Git History',
       title: 'Credential found in commit',
       detail: 'Commit: abc1234 by a contributor on Sun Jul 12 02:22:09 2026',
-    }], '3.4.0');
+    }], '3.4.1');
     assert.equal(historySarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri, '.');
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });

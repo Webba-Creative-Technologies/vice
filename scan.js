@@ -1,7 +1,6 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import inquirer from 'inquirer';
-import puppeteer from 'puppeteer';
 import { getViceDataDir } from './src/utils/paths.js';
 import {
   ALL_MODULES,
@@ -12,6 +11,7 @@ import {
 } from './src/core/modules.js';
 import { createScanMetrics } from './src/core/metrics.js';
 import { classifyCorsPolicy } from './src/core/detectors/cors.js';
+import { detectAnalyticsStack, recordStackSource, stackSourceLocation } from './src/core/detectors/stack.js';
 import { classifyCsrfEvidence, classifyStoredInputSurface } from './src/core/detectors/forms.js';
 import { classifyHardeningSignal } from './src/core/detectors/hardening.js';
 import { classifyPublicJson } from './src/core/detectors/public-json.js';
@@ -147,6 +147,7 @@ function addFinding(severity, module, title, detail, recommendation, metadata = 
 }
 
 async function launchBrowser() {
+  const { default: puppeteer } = await import('puppeteer');
   const context = getScanContext();
   if (context?.signal?.aborted) throw context.signal.reason || new Error('scan_cancelled');
   const args = ['--disable-dev-shm-usage'];
@@ -209,6 +210,7 @@ async function crawlWithHttpFallback(baseUrl, spinner, reportFindings) {
 
   const html = (await response.text()).slice(0, DISCOVERY_BUDGETS.sourceCharacters);
   const sources = [html];
+  recordStackSource(getScanContext(), html, response.url || baseUrl, 'HTML');
   const scriptUrls = new Set();
   const assetPattern = /<(?:script\b[^>]*\bsrc|link\b[^>]*\brel=["']modulepreload["'][^>]*\bhref)\s*=\s*["']([^"']+)["']/gi;
   let match;
@@ -221,7 +223,9 @@ async function crawlWithHttpFallback(baseUrl, spinner, reportFindings) {
     const scriptResponse = await safeFetch(scriptUrl);
     if (!scriptResponse || scriptResponse.status !== 200) continue;
     const source = await scriptResponse.text().catch(() => '');
-    if (source.length > 10) boundedPush(sources, source.slice(0, DISCOVERY_BUDGETS.sourceCharacters), DISCOVERY_BUDGETS.scriptSources);
+    if (source.length > 10 && boundedPush(sources, source.slice(0, DISCOVERY_BUDGETS.sourceCharacters), DISCOVERY_BUDGETS.scriptSources)) {
+      recordStackSource(getScanContext(), source, scriptResponse.url || scriptUrl);
+    }
   }
 
   getScanContext()?.limitations?.add('browser_crawl_unavailable');
@@ -256,11 +260,12 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
   const capturedScriptUrls = new Set();
   const pendingScriptReads = new Set();
   const scriptContents = [];
-  const addScriptSource = source => boundedPush(
-    scriptContents,
-    String(source || '').slice(0, DISCOVERY_BUDGETS.sourceCharacters),
-    DISCOVERY_BUDGETS.scriptSources,
-  );
+  const addScriptSource = (source, url = baseUrl, kind = 'JS', observed = false) => {
+    const content = String(source || '').slice(0, DISCOVERY_BUDGETS.sourceCharacters);
+    if (!boundedPush(scriptContents, content, DISCOVERY_BUDGETS.scriptSources)) return false;
+    recordStackSource(getScanContext(), content, url, kind, observed);
+    return true;
+  };
 
   const captureScriptResponse = async (response) => {
     try {
@@ -270,7 +275,7 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
         if (!scriptUrls.has(url) && boundedAdd(scriptUrls, url, DISCOVERY_BUDGETS.scriptUrls)) {
           const text = await response.text().catch(() => '');
           if (text.length > 10) {
-            addScriptSource(text);
+            addScriptSource(text, url, 'JS', response.status() === 200 && response.request().resourceType() === 'script');
             capturedScriptUrls.add(url);
           }
         }
@@ -322,7 +327,7 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
   spinner.text = 'Extracting the rendered DOM...';
   const html = (await page.content()).slice(0, DISCOVERY_BUDGETS.sourceCharacters);
   const domText = await page.evaluate(limit => document.documentElement.innerHTML.slice(0, limit), DISCOVERY_BUDGETS.sourceCharacters);
-  addScriptSource(domText);
+  addScriptSource(domText, page.url(), 'Rendered HTML');
 
   // Retrieve inline scripts from the DOM
   const inlineScripts = await page.evaluate(() => {
@@ -331,7 +336,9 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
       .map(s => s.textContent.slice(0, 512 * 1024))
       .filter(t => t && t.length > 10);
   });
-  for (const inlineScript of inlineScripts) addScriptSource(inlineScript);
+  for (const [index, inlineScript] of inlineScripts.entries()) {
+    addScriptSource(inlineScript, page.url(), `Inline script ${index + 1}`);
+  }
 
   // Browser response events are asynchronous and can otherwise finish after
   // the analysis starts. Fetch declared bundles deterministically as a fallback.
@@ -349,7 +356,7 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
     if (!scriptResponse || scriptResponse.status !== 200) continue;
     const text = await scriptResponse.text().catch(() => '');
     if (text.length > 10) {
-      addScriptSource(text);
+      addScriptSource(text, scriptResponse.url || scriptUrl);
       capturedScriptUrls.add(scriptUrl);
     }
   }
@@ -388,8 +395,8 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
       }
     }
     // Add storage content to scripts for later secret-pattern matching
-    addScriptSource('LOCALSTORAGE: ' + JSON.stringify(storage.local));
-    addScriptSource('SESSIONSTORAGE: ' + JSON.stringify(storage.session));
+    addScriptSource('LOCALSTORAGE: ' + JSON.stringify(storage.local), page.url(), 'Browser storage');
+    addScriptSource('SESSIONSTORAGE: ' + JSON.stringify(storage.session), page.url(), 'Browser storage');
   } catch {}
 
   // ── Subresource Integrity check on external scripts ──
@@ -545,7 +552,7 @@ async function crawlAndExtract(baseUrl, spinner, options = {}) {
         await page.goto(subUrl, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
         await new Promise(r => setTimeout(r, 2000));
         const subDom = await page.evaluate(limit => document.documentElement.innerHTML.slice(0, limit), DISCOVERY_BUDGETS.sourceCharacters);
-        addScriptSource(subDom);
+        addScriptSource(subDom, page.url(), 'Rendered HTML');
       } catch {}
     }
   }
@@ -2605,13 +2612,10 @@ const STACK_SIGNATURES = {
   'Clerk':         { html: [/clerk/i], headers: [], js: [/clerk\.com/, /@clerk/] },
 
   // Analytics / Tracking
-  'Google Analytics': { html: [/google-analytics/, /gtag/, /googletagmanager/], headers: [], js: [/google-analytics/, /gtag\(/] },
   'Hotjar':          { html: [/hotjar/i], headers: [], js: [/hotjar/] },
   'Sentry':          { html: [/sentry/i], headers: ['x-sentry-rate-limits'], js: [/sentry\.io/, /@sentry/] },
   'Mixpanel':        { html: [/mixpanel/i], headers: [], js: [/mixpanel/] },
-  'Segment':         { html: [/segment/i, /analytics\.js/], headers: [], js: [/segment\.com/, /analytics\.track/] },
   'Intercom':        { html: [/intercom/i], headers: [], js: [/intercom/i, /widget\.intercom/] },
-  'Crisp':           { html: [/crisp/i], headers: [], js: [/crisp\.chat/, /\$crisp/] },
 
   // Bundlers / Build tools
   'Webpack':       { html: [], headers: [], js: [/webpackChunk/, /__webpack_require__/, /webpack/] },
@@ -2642,6 +2646,11 @@ async function detectStack(baseUrl, jsContents, spinner) {
 
   const html = await res.text();
 
+  const sourceRecords = getScanContext()?.stackSources || [];
+  for (const [name, evidence] of detectAnalyticsStack({ html, baseUrl: res.url || baseUrl, sources: sourceRecords })) {
+    detected.set(name, evidence);
+  }
+
   for (const [techName, signatures] of Object.entries(STACK_SIGNATURES)) {
     const sources = [];
     const seenSources = new Set();
@@ -2667,7 +2676,7 @@ async function detectStack(baseUrl, jsContents, spinner) {
     for (const htmlPattern of signatures.html) {
       if (htmlPattern.test(html)) {
         const match = html.match(htmlPattern);
-        if (match) sources.push(`HTML: "${match[0].substring(0, 80)}"`);
+        if (match) sources.push(`${stackSourceLocation({ content: html, url: res.url || baseUrl, kind: 'HTML' }, match.index)}: signature /${htmlPattern.source}/`);
       }
     }
 
@@ -2677,7 +2686,8 @@ async function detectStack(baseUrl, jsContents, spinner) {
         if (jsPattern.test(js)) {
           const match = js.match(jsPattern);
           if (match) {
-            sources.push(`JS bundle: "${match[0].substring(0, 80)}"`);
+            const record = sourceRecords.find(source => source.content === js);
+            sources.push(`${stackSourceLocation(record || { content: js, url: baseUrl, kind: 'JS bundle (location unavailable)' }, match.index)}: signature /${jsPattern.source}/`);
             break; // One match per pattern is enough
           }
         }
@@ -2701,7 +2711,7 @@ async function detectStack(baseUrl, jsContents, spinner) {
     'Backend': ['Express', 'PHP', 'Django', 'Ruby on Rails', 'Laravel'],
     'CMS': ['WordPress', 'Shopify', 'Webflow'],
     'BaaS & Services': ['Supabase', 'Firebase', 'Stripe', 'Auth0', 'Clerk'],
-    'Analytics & Tracking': ['Google Analytics', 'Hotjar', 'Sentry', 'Mixpanel', 'Segment', 'Intercom', 'Crisp'],
+    'Analytics & Tracking': ['Google Analytics', 'Google Tag Manager', 'Hotjar', 'Sentry', 'Mixpanel', 'Segment', 'Intercom', 'Crisp'],
     'Build Tools': ['Webpack', 'Vite', 'Turbopack'],
     'UI': ['Tailwind CSS', 'Bootstrap', 'Material UI', 'Shadcn/UI'],
   };
