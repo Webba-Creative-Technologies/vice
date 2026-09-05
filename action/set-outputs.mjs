@@ -1,9 +1,10 @@
 // ──────────────────────────────────────────────
-// VICE Action — Set GitHub Action outputs from JSON report
+// VICE Action - Set GitHub Action outputs from JSON report
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
 import fs from 'node:fs';
+import { gradeForScore } from '../src/core/score-policy.js';
 
 const reportPath = process.argv[2];
 const githubOutput = process.env.GITHUB_OUTPUT;
@@ -19,7 +20,7 @@ if (!githubOutput) {
 }
 
 function writeOutputs(outputs) {
-  const content = Object.entries(outputs).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+  const content = Object.entries(outputs).map(([k, v]) => `${k}=${String(v).replace(/[\r\n]/g, '')}`).join('\n') + '\n';
   fs.appendFileSync(githubOutput, content);
 }
 
@@ -42,7 +43,7 @@ let report;
 try {
   report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
 } catch (err) {
-  console.error(`vice-action: failed to parse report: ${err.message}`);
+  console.error('vice-action: failed to parse report');
   writeOutputs({
     score: 0,
     grade: 'F',
@@ -57,7 +58,7 @@ try {
 }
 
 if (report.error) {
-  console.error(`vice-action: scan failed: ${report.error}`);
+  console.error('vice-action: scan failed');
   writeOutputs({
     score: 0,
     grade: 'F',
@@ -72,15 +73,17 @@ if (report.error) {
 }
 
 const summary = report.summary || {};
+const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+const grade = gradeForScore(report.score);
 writeOutputs({
-  score: report.score ?? 0,
-  grade: report.grade || 'F',
-  total: summary.total || 0,
-  critical: summary.critical || 0,
-  high: summary.high || 0,
-  medium: summary.medium || 0,
-  low: summary.low || 0,
+  score: grade ? report.score : '',
+  grade: grade || '',
+  total: count(summary.total),
+  critical: count(summary.critical),
+  high: count(summary.high),
+  medium: count(summary.medium),
+  low: count(summary.low),
   'report-path': reportPath,
 });
 
-console.log(`VICE: score ${report.score}/100 (${report.grade}) — ${summary.total || 0} findings`);
+console.log(grade ? `VICE: score ${report.score}/100 (${grade}) - ${count(summary.total)} findings` : 'VICE: score unavailable');

@@ -62,19 +62,26 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    - name: Set up VICE runtime
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      with:
+        node-version: '22'
+
     - name: Install VICE dependencies
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: npm install --omit=dev --omit=optional --no-audit --no-fund --silent
+      run: npm ci --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund --silent
 
     - name: Run VICE audit
       id: scan
       shell: bash
       env:
         VICE_ACCEPT_TERMS: '1'
+        VICE_AUDIT_PATH: ${{ inputs.path }}
+        VICE_MIN_SCORE: ${{ inputs.min-score }}
       continue-on-error: true
       run: |
-        node "${{ github.action_path }}/bin/vice.js" audit "${{ inputs.path }}" --ci --json --min-score "${{ inputs.min-score }}" > "${{ runner.temp }}/vice-results.json"
+        node "${{ github.action_path }}/bin/vice.js" audit "$VICE_AUDIT_PATH" --ci --json --min-score "$VICE_MIN_SCORE" > "${{ runner.temp }}/vice-results.json"
 
     - name: Set action outputs
       id: set-outputs
@@ -87,13 +94,14 @@ runs:
       shell: bash
       env:
         VICE_ACCEPT_TERMS: '1'
+        VICE_AUDIT_PATH: ${{ inputs.path }}
       continue-on-error: true
       run: |
-        node "${{ github.action_path }}/bin/vice.js" audit "${{ inputs.path }}" --ci --format sarif --min-score 0 --output "${{ runner.temp }}/vice.sarif"
+        node "${{ github.action_path }}/bin/vice.js" audit "$VICE_AUDIT_PATH" --ci --format sarif --min-score 0 --output "${{ runner.temp }}/vice.sarif"
 
     - name: Upload SARIF to GitHub Code Scanning
       if: inputs.upload-sarif == 'true' && steps.sarif.outcome == 'success'
-      uses: github/codeql-action/upload-sarif@v4
+      uses: github/codeql-action/upload-sarif@fddeee1a7ece751b577e409a89057319e3172939 # v4
       with:
         sarif_file: ${{ runner.temp }}/vice.sarif
         category: vice
@@ -116,11 +124,12 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
-      run: node "${{ github.action_path }}/action/update-badge.mjs" "${{ runner.temp }}/vice-results.json" "${{ inputs.badge-path }}"
+        VICE_BADGE_PATH: ${{ inputs.badge-path }}
+      run: node "${{ github.action_path }}/action/update-badge.mjs" "${{ runner.temp }}/vice-results.json" "$VICE_BADGE_PATH"
 
     - name: Fail if score below threshold
       if: inputs.fail-on-score == 'true' && steps.scan.outcome == 'failure'
       shell: bash
       run: |
-        echo "::error::VICE security score is below the minimum threshold of ${{ inputs.min-score }}"
+        echo "::error::VICE audit failed or its score is below the configured threshold."
         exit 1

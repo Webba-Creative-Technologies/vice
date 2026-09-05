@@ -1,20 +1,13 @@
 // ──────────────────────────────────────────────
-// VICE Action — Generate badge JSON and commit it via Contents API
+// VICE Action - Generate badge JSON and commit it via Contents API
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { contentsEndpoint, githubApi } from './api.mjs';
+import { generateBadge, readReportFile } from '../src/core/badge.js';
 
-const GRADE_COLORS = {
-  A: 'brightgreen',
-  B: 'green',
-  C: 'yellow',
-  D: 'orange',
-  E: 'red',
-  F: 'critical',
-};
 
 const reportPath = process.argv[2];
 const badgePath = process.argv[3] || '.github/vice-badge.json';
@@ -45,12 +38,8 @@ if (report.error || typeof report.score !== 'number' || !report.grade) {
   process.exit(0);
 }
 
-const badge = {
-  schemaVersion: 1,
-  label: 'vice security',
-  message: `${report.grade} \u2014 ${report.score}/100`,
-  color: GRADE_COLORS[report.grade] || 'lightgrey',
-};
+const parsedReport = readReportFile(reportPath);
+const badge = generateBadge(parsedReport.score, parsedReport.grade, parsedReport.options);
 
 const newContent = JSON.stringify(badge, null, 2) + '\n';
 const newContentBase64 = Buffer.from(newContent, 'utf-8').toString('base64');
@@ -59,15 +48,12 @@ const newContentBase64 = Buffer.from(newContent, 'utf-8').toString('base64');
 let existingSha = null;
 let existingBase64 = null;
 try {
-  const result = execSync(
-    `gh api "repos/${repo}/contents/${badgePath}?ref=${branch}"`,
-    { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }
-  );
+  const result = githubApi([contentsEndpoint(repo, badgePath, branch)]);
   const parsed = JSON.parse(result);
   existingSha = parsed.sha || null;
   existingBase64 = (parsed.content || '').replace(/\s/g, '') || null;
 } catch {
-  // File does not exist on this branch yet — will be created
+  // File does not exist on this branch yet - will be created
 }
 
 if (existingBase64 === newContentBase64) {
@@ -86,15 +72,11 @@ const payloadFile = path.join(tmpDir, `vice-badge-${Date.now()}.json`);
 fs.writeFileSync(payloadFile, JSON.stringify(payload));
 
 try {
-  execSync(
-    `gh api "repos/${repo}/contents/${badgePath}" --input "${payloadFile}" -X PUT`,
-    { stdio: 'inherit' }
-  );
+  githubApi([contentsEndpoint(repo, badgePath), '--input', payloadFile, '-X', 'PUT']);
   console.log(`vice-action: badge committed to ${branch}: ${badge.message}`);
 } catch (err) {
   console.error('vice-action: failed to commit badge.');
   console.error('Make sure the workflow has `contents: write` permission.');
-  console.error(`Error: ${err.message}`);
   // Best-effort: do not fail the action
 } finally {
   try { fs.unlinkSync(payloadFile); } catch {}

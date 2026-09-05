@@ -1,7 +1,10 @@
 // ──────────────────────────────────────────────
-// VICE Action — Markdown formatter for PR comments
+// VICE Action - Markdown formatter for PR comments
 // Webba Creative Technologies (c) 2026
 // ──────────────────────────────────────────────
+
+import { scorePresentation } from '../src/core/score-policy.js';
+import { redactSensitiveText } from '../src/core/redaction.js';
 
 const SEVERITY_LABELS = {
   CRITICAL: 'Critical', CRITIQUE: 'Critical',
@@ -20,7 +23,8 @@ function normalizeSeverity(sev) {
 
 function escapeMarkdown(s) {
   if (s === undefined || s === null) return '';
-  return String(s)
+  return redactSensitiveText(String(s))
+    .replace(/([\\`*_[\]()!])/g, '\\$1')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\|/g, '\\|');
@@ -41,7 +45,17 @@ export function formatPrComment(report, options = {}) {
   lines.push('');
 
   // Score and grade
-  lines.push(`**Score: ${report.grade}** &mdash; ${report.score}/100${diffString(report.score, previousScore)}`);
+  const findings = Array.isArray(report.findings) ? report.findings.filter(f => f && !f.baselined) : [];
+  const presentation = scorePresentation(report.score, {
+    criticalCount: findings.filter(f => normalizeSeverity(f.severity) === 'Critical').length,
+    highCount: findings.filter(f => normalizeSeverity(f.severity) === 'High').length,
+    reliable: report.score_reliable,
+    coverageStatus: report.coverage?.status,
+  });
+  lines.push(presentation.grade === null ? '**Score unavailable**'
+    : `**Score: ${presentation.grade}** - ${report.score}/100${diffString(report.score, previousScore)}`);
+  if (presentation.critical) lines.push('Critical findings require attention.');
+  if (presentation.provisional) lines.push('Provisional score: some checks could not be completed.');
   lines.push('');
 
   // Summary table
@@ -56,7 +70,7 @@ export function formatPrComment(report, options = {}) {
     if (summary.info > 0) lines.push(`| Info | ${summary.info} |`);
     lines.push('');
   } else {
-    lines.push('No vulnerabilities detected. Good job.');
+    lines.push('No actionable findings were reported by the completed checks.');
     lines.push('');
   }
 
@@ -96,7 +110,7 @@ export function formatPrComment(report, options = {}) {
   }
 
   lines.push('---');
-  lines.push(`Scanned with [VICE](${repoUrl})${report.version ? ` v${report.version}` : ''}`);
+  lines.push(`Scanned with [VICE](${repoUrl})${report.version ? ` v${escapeMarkdown(report.version)}` : ''}`);
 
   return lines.join('\n');
 }
