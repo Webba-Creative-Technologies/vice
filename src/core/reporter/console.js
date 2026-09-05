@@ -10,7 +10,7 @@ import { ENGINE_VERSION } from '../version.js';
 
 export function printReport(title = 'Security Audit Report', options = {}) {
   const allFindings = getFindings();
-  const { score, grade, color } = calculateScore(undefined, options);
+  const { score, grade, color, presentation } = calculateScore(undefined, options);
 
   // Findings suppressed by baseline are kept in the array but not displayed
   // by default, to keep the report focused on what actually needs action.
@@ -24,13 +24,15 @@ export function printReport(title = 'Security Audit Report', options = {}) {
   console.log(chalk.bold('━'.repeat(60)));
   console.log('');
   console.log(`  Security Score: ${color(` ${grade} `)} ${chalk.gray(`(${score}/100)`)}`);
+  if (presentation.critical) console.log(chalk.red('  Critical findings require attention regardless of the numeric score.'));
+  if (presentation.provisional) console.log(chalk.yellow('  Provisional score: requested checks were not fully verified.'));
   if (baselinedCount > 0) {
     console.log(chalk.gray(`  ${baselinedCount} finding(s) suppressed by baseline`));
   }
 
   if (findings.length === 0) {
     if (allFindings.length === 0) {
-      console.log(chalk.green('\n  No vulnerabilities detected. Good job!\n'));
+      console.log(chalk.gray('\n  No findings on the checked surface.\n'));
     } else {
       console.log(chalk.green('\n  No new findings beyond the baseline.\n'));
     }

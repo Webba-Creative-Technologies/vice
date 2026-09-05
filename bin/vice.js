@@ -160,7 +160,8 @@ async function viewHistory() {
   const scan = scans[selectedScan];
   clearFindings();
   loadFindings(scan.data.findings);
-  printReport(`Saved scan - ${scan.target} - ${scan.date}`);
+  const scoreOptions = { ...scan.data.score_options, reliable: scan.data.score_reliable, coverageStatus: scan.data.coverage?.status, authStatus: scan.data.authentication?.status };
+  printReport(`Saved scan - ${scan.target} - ${scan.date}`, scoreOptions);
 
   const { postAction } = await inquirer.prompt([{
     type: 'list', name: 'postAction', message: 'Action:',
@@ -173,7 +174,7 @@ async function viewHistory() {
   }]);
 
   if (postAction === 'html') {
-    await exportHtml(scan.data.url, DATA_DIR);
+    await exportHtml(scan.data.url, DATA_DIR, scoreOptions);
     await viewHistory();
   } else if (postAction === 'delete') {
     const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message: `Delete ${scan.file}?`, default: false }]);
@@ -381,10 +382,10 @@ async function runJsonAuditMode(target, minScore, options = {}) {
     applyProjectBaseline(resolved, options);
 
     const findings = getFindings();
-    const { score, grade } = calculateScore(undefined, { minConfidence: options.minConfidence, minSeverity: options.minSeverity });
+    const { score, grade, presentation } = calculateScore(undefined, { minConfidence: options.minConfidence, minSeverity: options.minSeverity });
 
     // Best-effort: still save to history so the file is available locally
-    try { await exportJson(resolved, DATA_DIR); } catch {}
+    try { await exportJson(resolved, DATA_DIR, { minConfidence: options.minConfidence, minSeverity: options.minSeverity }); } catch {}
 
     const output = {
       version: readPkgVersion(),
@@ -392,6 +393,7 @@ async function runJsonAuditMode(target, minScore, options = {}) {
       timestamp: new Date().toISOString(),
       score,
       grade,
+      presentation,
       summary: buildSummary(findings),
       findings: enrichWithTaxonomy(findings),
     };
@@ -460,7 +462,7 @@ async function runSarifMode(target, minScore, outputPath, options = {}) {
     const { score } = calculateScore(undefined, { minConfidence: options.minConfidence, minSeverity: options.minSeverity });
 
     // Best-effort: still save the JSON history locally
-    try { await exportJson(resolved, DATA_DIR); } catch {}
+    try { await exportJson(resolved, DATA_DIR, { minConfidence: options.minConfidence, minSeverity: options.minSeverity }); } catch {}
 
     const sarif = buildSarif(findings, readPkgVersion());
     const exitCode = (minScore !== null && score < minScore) ? 1 : 0;
@@ -488,8 +490,8 @@ async function runBadgeCommand(args) {
   }
 
   try {
-    const { score, grade } = readReportFile(inputPath);
-    const written = writeBadgeFile(score, grade, outputPath);
+    const { score, grade, options } = readReportFile(inputPath);
+    const written = writeBadgeFile(score, grade, outputPath, options);
     console.log(chalk.green(`  Badge written to ${written}`));
     console.log(chalk.gray(`  Score: ${grade} (${score}/100)`));
     console.log(chalk.gray(`  Source: ${inputPath}`));

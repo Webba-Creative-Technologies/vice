@@ -35,6 +35,7 @@ import { createScopePolicy } from './src/core/scope.js';
 import { installScopedRequestInterception } from './src/core/browser-scope.js';
 import { appendFinding } from './src/core/findings.js';
 import { calculateScore as calculateCoreScore } from './src/core/score.js';
+import { scorePresentation } from './src/core/score-policy.js';
 import { ENGINE_VERSION, RULESET_VERSION, SCORING_VERSION } from './src/core/version.js';
 import { classifySensitiveFile } from './src/core/detectors/sensitive-file.js';
 import { classifyHttpOnlySubdomain, classifyOpenService } from './src/core/detectors/open-service.js';
@@ -4098,10 +4099,13 @@ export function calculateScanScore(sourceFindings = findings) {
 
 // ──────────── RAPPORT ────────────
 
-function printReport() {
-  const { score, grade, color } = calculateScanScore();
+function printReport(result = null) {
+  const { score, grade, color } = calculateCoreScore(findings, { minConfidence: 'medium', reliable: result?.score_reliable });
+  const presentation = result?.presentation || calculateScanScore().presentation;
 
   console.log('\n');
+  if (presentation.critical) console.log(chalk.red('Critical findings require attention regardless of the numeric score.'));
+  if (presentation.provisional) console.log(chalk.yellow('Provisional score: requested checks were not fully verified.'));
   console.log(chalk.bold('━'.repeat(60)));
   console.log(chalk.hex('#995ff6').bold('  VICE') + chalk.gray(' - Rapport d\'audit de securite'));
   console.log(chalk.gray('  Webba Creative Technologies'));
@@ -4112,7 +4116,7 @@ function printReport() {
   console.log(`  Score de securite: ${color(` ${grade} `)} ${chalk.gray(`(${score}/100)`)}`);
 
   if (findings.length === 0) {
-    console.log(chalk.green('\n  Aucune faille detectee. Bon travail !\n'));
+    console.log(chalk.gray('\n  No findings on the checked surface.\n'));
     return;
   }
 
@@ -4165,6 +4169,13 @@ export function buildBlackBoxReport(url, result = null, date = new Date().toISOS
     engine_version: result?.engine_version || ENGINE_VERSION,
     ruleset_version: result?.ruleset_version || RULESET_VERSION,
     scoring_version: result?.scoring_version || SCORING_VERSION,
+    presentation: scorePresentation(hasResultScore ? result.score : calculated.score, {
+      criticalCount: (result?.findings || findings).filter(f => !f.baselined && ['CRITICAL', 'CRITIQUE'].includes(f.severity)).length,
+      highCount: (result?.findings || findings).filter(f => !f.baselined && ['HIGH', 'ELEVEE'].includes(f.severity)).length,
+      reliable: result?.score_reliable,
+      coverageStatus: result?.coverage?.status,
+      authStatus: result?.authentication?.status,
+    }),
     score_reliable: result?.score_reliable ?? null,
     modules: result?.modules || null,
     errors: result?.errors || [],
@@ -4192,8 +4203,9 @@ async function exportJson(url, result = null) {
   console.log(chalk.gray(`  Rapport JSON exporte: ${filename}\n`));
 }
 
-async function exportHtml(url) {
-  const { score, grade } = calculateScanScore();
+async function exportHtml(url, result = null) {
+  const report = buildBlackBoxReport(url, result);
+  const { score, grade, presentation } = report;
   const hostname = new URL(url).hostname;
   const fs = await import('fs');
   const path = await import('path');
@@ -4210,7 +4222,9 @@ async function exportHtml(url) {
   const sorted = [...findings].sort((a,b) => (sevOrder[a.severity]??5) - (sevOrder[b.severity]??5));
   const sevColors = {CRITICAL:'#c0392b',CRITIQUE:'#c0392b',HIGH:'#d35400',ELEVEE:'#d35400',MEDIUM:'#b8860b',MOYENNE:'#b8860b',LOW:'#5b7ea1',FAIBLE:'#5b7ea1',INFO:'#8e99a4'};
   const sevLabels = {CRITICAL:'Critical',CRITIQUE:'Critical',HIGH:'High',ELEVEE:'High',MEDIUM:'Medium',MOYENNE:'Medium',LOW:'Low',FAIBLE:'Low',INFO:'Info'};
-  const gradeColors = {A:'#27ae60',B:'#2e86c1',C:'#b8860b',D:'#c0392b',E:'#7b241c',F:'#4a1410'};
+  const gradeColors = { [grade]: presentation.tone === 'error' ? '#c0392b' : presentation.tone === 'success' ? '#27ae60' : '#b8860b' };
+  const warningsHtml = (presentation.critical ? '<p>Critical findings require attention regardless of the numeric score.</p>' : '')
+    + (presentation.provisional ? '<p>Provisional score: requested checks were not fully verified.</p>' : '');
   let findingsHtml = '';
   let currentModule = '';
   for (const f of sorted) {
@@ -4222,7 +4236,7 @@ async function exportHtml(url) {
   const statsHtml = allSevs.filter(s=>counts[s]).map(s=>`<span class="stat-pill" style="background:${sevColors[s]}">${sevLabels[s]} ${counts[s]}</span>`).join('');
   const dateStr = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
   const timeStr = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
-  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"><title>VICE Report - ${safeHostname}</title><style>:root{--primary:#995ff6;--accent:#ee967a;--bg:#fafafa;--card:#fff;--text:#2c2c2c;--text-light:#6b6b6b;--text-muted:#9a9a9a;--border:#e8e8e8}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}.container{max-width:780px;margin:0 auto;padding:48px 24px 64px}.header{margin-bottom:48px}.header-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px}.logo{font-size:14px;font-weight:600;color:var(--primary);letter-spacing:2px;text-transform:uppercase}.date{font-size:13px;color:var(--text-muted)}.target{font-size:28px;font-weight:700;color:var(--text);margin-bottom:4px;word-break:break-all}.target-url{font-size:14px;color:var(--text-light);margin-bottom:32px}.score-section{display:flex;align-items:center;gap:24px;padding:28px 32px;background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px}.grade-circle{width:72px;height:72px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:#fff;flex-shrink:0}.score-info{flex:1}.score-number{font-size:20px;font-weight:700;color:var(--text)}.score-label{font-size:13px;color:var(--text-muted);margin-top:2px}.stats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:40px}.stat-pill{display:inline-block;padding:4px 14px;border-radius:100px;font-size:12px;font-weight:600;color:#fff;letter-spacing:.3px}.module-title{font-size:16px;font-weight:700;color:var(--text);margin-top:36px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border)}.module-title:first-child{margin-top:0}.finding{padding:16px 20px;background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:10px}.finding-header{display:flex;align-items:flex-start;gap:10px;margin-bottom:6px}.badge{display:inline-block;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;color:#fff;text-transform:uppercase;letter-spacing:.5px;flex-shrink:0;margin-top:2px}.finding-title{font-size:14px;font-weight:600;color:var(--text);line-height:1.4}.finding-detail{font-family:'SF Mono','Fira Code','Consolas',monospace;font-size:12px;line-height:1.5;color:var(--text-light);background:#f5f5f5;border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin:8px 0;white-space:pre-wrap;word-break:break-word;overflow-x:auto}.finding-reco{font-size:13px;color:#27ae60;margin-top:8px;padding-left:2px;line-height:1.5}.finding-reco::before{content:"\\2192  "}.footer{margin-top:56px;padding-top:24px;border-top:1px solid var(--border);text-align:center;font-size:12px;color:var(--text-muted);line-height:1.8}.footer a{color:var(--primary);text-decoration:none}.footer a:hover{text-decoration:underline}@media(max-width:600px){.container{padding:24px 16px 48px}.header-top{flex-direction:column;align-items:flex-start;gap:8px}.target{font-size:22px}.score-section{flex-direction:column;text-align:center;padding:24px}.finding-header{flex-direction:column;gap:6px}}</style></head><body><div class="container"><div class="header"><div class="header-top"><div class="logo">VICE</div><div class="date">${dateStr} at ${timeStr}</div></div><div class="target">${safeHostname}</div><div class="target-url">${safeUrl}</div></div><div class="score-section"><div class="grade-circle" style="background:${gradeColors[grade]||'#888'}">${grade}</div><div class="score-info"><div class="score-number">${score} / 100</div><div class="score-label">${findings.length} finding${findings.length!==1?'s':''} detected</div></div></div><div class="stats">${statsHtml}</div>${findingsHtml}<div class="footer">Generated by <a href="https://github.com/Webba-Creative-Technologies/vice">VICE</a> v3.0<br><a href="https://webba-creative.com">Webba Creative Technologies</a> &copy; 2026<br>This tool is intended for authorized security testing only.</div></div></body></html>`;
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"><title>VICE Report - ${safeHostname}</title><style>:root{--primary:#995ff6;--accent:#ee967a;--bg:#fafafa;--card:#fff;--text:#2c2c2c;--text-light:#6b6b6b;--text-muted:#9a9a9a;--border:#e8e8e8}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}.container{max-width:780px;margin:0 auto;padding:48px 24px 64px}.header{margin-bottom:48px}.header-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px}.logo{font-size:14px;font-weight:600;color:var(--primary);letter-spacing:2px;text-transform:uppercase}.date{font-size:13px;color:var(--text-muted)}.target{font-size:28px;font-weight:700;color:var(--text);margin-bottom:4px;word-break:break-all}.target-url{font-size:14px;color:var(--text-light);margin-bottom:32px}.score-section{display:flex;align-items:center;gap:24px;padding:28px 32px;background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px}.grade-circle{width:72px;height:72px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:#fff;flex-shrink:0}.score-info{flex:1}.score-number{font-size:20px;font-weight:700;color:var(--text)}.score-label{font-size:13px;color:var(--text-muted);margin-top:2px}.stats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:40px}.stat-pill{display:inline-block;padding:4px 14px;border-radius:100px;font-size:12px;font-weight:600;color:#fff;letter-spacing:.3px}.module-title{font-size:16px;font-weight:700;color:var(--text);margin-top:36px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border)}.module-title:first-child{margin-top:0}.finding{padding:16px 20px;background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:10px}.finding-header{display:flex;align-items:flex-start;gap:10px;margin-bottom:6px}.badge{display:inline-block;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;color:#fff;text-transform:uppercase;letter-spacing:.5px;flex-shrink:0;margin-top:2px}.finding-title{font-size:14px;font-weight:600;color:var(--text);line-height:1.4}.finding-detail{font-family:'SF Mono','Fira Code','Consolas',monospace;font-size:12px;line-height:1.5;color:var(--text-light);background:#f5f5f5;border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin:8px 0;white-space:pre-wrap;word-break:break-word;overflow-x:auto}.finding-reco{font-size:13px;color:#27ae60;margin-top:8px;padding-left:2px;line-height:1.5}.finding-reco::before{content:"\\2192  "}.footer{margin-top:56px;padding-top:24px;border-top:1px solid var(--border);text-align:center;font-size:12px;color:var(--text-muted);line-height:1.8}.footer a{color:var(--primary);text-decoration:none}.footer a:hover{text-decoration:underline}@media(max-width:600px){.container{padding:24px 16px 48px}.header-top{flex-direction:column;align-items:flex-start;gap:8px}.target{font-size:22px}.score-section{flex-direction:column;text-align:center;padding:24px}.finding-header{flex-direction:column;gap:6px}}</style></head><body><div class="container"><div class="header"><div class="header-top"><div class="logo">VICE</div><div class="date">${dateStr} at ${timeStr}</div></div><div class="target">${safeHostname}</div><div class="target-url">${safeUrl}</div></div><div class="score-section"><div class="grade-circle" style="background:${gradeColors[grade]||'#888'}">${grade ?? 'N/A'}</div><div class="score-info"><div class="score-number">${score ?? 'N/A'} / 100</div><div class="score-label">${findings.length} finding${findings.length!==1?'s':''} detected</div></div></div>${warningsHtml}<div class="stats">${statsHtml}</div>${findingsHtml}<div class="footer"><a href="https://github.com/Webba-Creative-Technologies/vice">VICE</a> v3.0<br><a href="https://webba-creative.com">Webba Creative Technologies</a> &copy; 2026<br>This tool is intended for authorized security testing only.</div></div></body></html>`;
   fs.writeFileSync(filename, html.replace('VICE</a> v3.0<br>', `VICE</a> v${ENGINE_VERSION}<br>`));
   console.log(chalk.gray(`  HTML report exported: ${filename}\n`));
 }
@@ -4297,8 +4311,10 @@ async function viewHistory() {
   console.log(chalk.gray('  Webba Creative Technologies'));
   console.log(chalk.bold('━'.repeat(60)));
 
-  const gradeColors = { A: chalk.green.bold, B: chalk.cyan.bold, C: chalk.yellow.bold, D: chalk.red.bold, E: chalk.bgRed.white.bold, F: chalk.bgRed.white.bold };
-  const gradeColorFn = gradeColors[scan.grade] || chalk.white;
+  const presentation = buildBlackBoxReport(scan.data.url, scan.data).presentation;
+  const gradeColorFn = presentation.tone === 'error' ? chalk.red.bold : presentation.tone === 'success' ? chalk.green.bold : chalk.yellow.bold;
+  if (presentation.critical) console.log(chalk.red('Critical findings require attention regardless of the numeric score.'));
+  if (presentation.provisional) console.log(chalk.yellow('Provisional score: requested checks were not fully verified.'));
   console.log(`\n  Score: ${gradeColorFn(` ${scan.grade} `)} ${chalk.gray(`(${scan.score}/100)`)}`);
 
   const order = ['CRITIQUE', 'ELEVEE', 'MOYENNE', 'FAIBLE', 'INFO'];
@@ -4351,7 +4367,7 @@ async function viewHistory() {
     // Injecter les findings du scan charge pour l'export
     findings.length = 0;
     findings.push(...scan.data.findings);
-    await exportHtml(scan.data.url);
+    await exportHtml(scan.data.url, scan.data);
   } else if (postAction === 'delete') {
     const { confirmDelete } = await inquirer.prompt([
       { type: 'confirm', name: 'confirmDelete', message: `Supprimer ${scan.file}?`, default: false },
@@ -4593,6 +4609,11 @@ async function runScanInternal(config, httpClient, context) {
     metrics: scanMetrics,
     coverage,
     score_reliable: coverage.status === 'complete',
+    presentation: scorePresentation(scoreAvailable ? score.score : null, {
+      criticalCount: context.findings.filter(f => ['CRITICAL', 'CRITIQUE'].includes(f.severity)).length,
+      highCount: context.findings.filter(f => ['HIGH', 'ELEVEE'].includes(f.severity)).length,
+      coverageStatus: coverage.status,
+    }),
     engine_version: ENGINE_VERSION,
     ruleset_version: RULESET_VERSION,
     score_breakdown: {
@@ -4764,7 +4785,7 @@ async function main(options = {}) {
   findings.length = 0;
   findings.push(...result.findings);
   // REPORT
-  printReport();
+  printReport(result);
   if (!result.score_reliable) {
     console.log(chalk.yellow('  Score provisional: some checks were incomplete. See coverage in the JSON report.\n'));
   }
@@ -4785,7 +4806,7 @@ async function main(options = {}) {
       ]);
 
   if (wantHtml) {
-    await exportHtml(baseUrl);
+    await exportHtml(baseUrl, result);
   }
 
   console.log(chalk.hex('#6366f1')('  Webba Creative Technologies') + chalk.gray(' - Scan complete.\n'));

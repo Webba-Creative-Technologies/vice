@@ -5,27 +5,23 @@
 
 import fs from 'fs';
 import path from 'path';
+import { scorePresentation } from './score-policy.js';
 
-const GRADE_COLORS = {
-  A: 'brightgreen',
-  B: 'green',
-  C: 'yellow',
-  D: 'orange',
-  E: 'red',
-  F: 'critical',
-};
+const TONE_COLORS = { success: 'brightgreen', warning: 'yellow', error: 'critical', default: 'lightgrey' };
 
-export function generateBadge(score, grade) {
+export function generateBadge(score, grade, options = {}) {
+  const presentation = scorePresentation(score, options);
+  const suffix = presentation.critical ? ' - critical' : presentation.provisional ? ' - provisional' : '';
   return {
     schemaVersion: 1,
     label: 'vice security',
-    message: `${grade} - ${score}/100`,
-    color: GRADE_COLORS[grade] || 'lightgrey',
+    message: presentation.grade === null ? 'no score' : `${presentation.grade} - ${score}/100${suffix}`,
+    color: TONE_COLORS[presentation.tone],
   };
 }
 
-export function writeBadgeFile(score, grade, outputPath) {
-  const badge = generateBadge(score, grade);
+export function writeBadgeFile(score, grade, outputPath, options = {}) {
+  const badge = generateBadge(score, grade, options);
   const dir = path.dirname(path.resolve(outputPath));
   if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(badge, null, 2) + '\n');
@@ -41,7 +37,14 @@ export function readReportFile(inputPath) {
   if (typeof data.score !== 'number' || !data.grade) {
     throw new Error(`Invalid report file: missing score or grade`);
   }
-  return { score: data.score, grade: data.grade };
+  const findings = Array.isArray(data.findings) ? data.findings.filter(f => f && !f.baselined) : [];
+  return { score: data.score, grade: data.grade, options: {
+    criticalCount: findings.filter(f => ['critical', 'critique'].includes(String(f.severity).toLowerCase())).length,
+    highCount: findings.filter(f => ['high', 'elevee'].includes(String(f.severity).toLowerCase())).length,
+    reliable: data.score_reliable,
+    coverageStatus: data.coverage?.status,
+    authStatus: data.authentication?.status,
+  } };
 }
 
 export function findLatestReport(scansDir) {

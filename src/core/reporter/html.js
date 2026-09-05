@@ -12,8 +12,8 @@ import { enrichWithTaxonomy } from './sarif.js';
 import { escapeHtml } from './escape.js';
 import { ENGINE_VERSION } from '../version.js';
 
-export async function exportHtml(url, baseDir) {
-  const { score, grade } = calculateScore();
+export async function exportHtml(url, baseDir, options = {}) {
+  const { score, grade, presentation } = calculateScore(undefined, options);
   const findings = enrichWithTaxonomy(getFindings());
   const hostname = url.startsWith('http') ? new URL(url).hostname : path.basename(url);
   const dir = path.join(baseDir, 'scans');
@@ -40,7 +40,7 @@ export async function exportHtml(url, baseDir) {
     LOW: 'Low', FAIBLE: 'Low',
     INFO: 'Info',
   };
-  const gradeColors = { A: '#27ae60', B: '#2e86c1', C: '#b8860b', D: '#c0392b', E: '#7b241c', F: '#4a1410' };
+  const toneColors = { success: '#27ae60', warning: '#b8860b', error: '#c0392b', default: '#888' };
 
   // Build findings HTML
   let findingsHtml = '';
@@ -338,9 +338,11 @@ export async function exportHtml(url, baseDir) {
     </div>
 
     <div class="score-section">
-      <div class="grade-circle" style="background:${gradeColors[grade] || '#888'}">${grade}</div>
+      <div class="grade-circle" style="background:${toneColors[presentation.tone]}">${grade}</div>
       <div class="score-info">
         <div class="score-number">${score} / 100</div>
+        ${presentation.critical ? '<p>Critical findings require attention regardless of the numeric score.</p>' : ''}
+        ${presentation.provisional ? '<p>Provisional score: requested checks were not fully verified.</p>' : ''}
         <div class="score-label">${findings.length} finding${findings.length !== 1 ? 's' : ''} detected</div>
       </div>
     </div>
