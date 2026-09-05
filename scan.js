@@ -35,11 +35,12 @@ import { createScopePolicy } from './src/core/scope.js';
 import { installScopedRequestInterception } from './src/core/browser-scope.js';
 import { appendFinding } from './src/core/findings.js';
 import { calculateScore as calculateCoreScore } from './src/core/score.js';
-import { scorePresentation } from './src/core/score-policy.js';
+import { gradeForScore, scorePresentation } from './src/core/score-policy.js';
 import { ENGINE_VERSION, RULESET_VERSION, SCORING_VERSION } from './src/core/version.js';
 import { classifySensitiveFile } from './src/core/detectors/sensitive-file.js';
 import { classifyHttpOnlySubdomain, classifyOpenService } from './src/core/detectors/open-service.js';
 import { classifyDkimSearch } from './src/core/detectors/dns-email.js';
+import { dnsPolicyOutcome } from './src/core/check-outcomes.js';
 import { classifyWordpressSurface } from './src/core/detectors/wordpress.js';
 import { createSupabaseCanary } from './src/core/canary.js';
 import { classifyUnauthenticatedApiResponse, findMassAssignmentSurfaces } from './src/core/detectors/api-schema.js';
@@ -2949,12 +2950,14 @@ async function auditDns(baseUrl, spinner) {
   spinner.text = 'Checking SPF...';
   let spfFound = false;
   let spfLookupConclusive = false;
+  let spfOutcome = dnsPolicyOutcome('spf', baseDomain, null);
   try {
     const txtRecords = await resolveTxt(baseDomain);
+    spfOutcome = dnsPolicyOutcome('spf', baseDomain, txtRecords);
     spfLookupConclusive = true;
     for (const record of txtRecords) {
       const txt = record.join('');
-      if (txt.includes('v=spf1')) {
+      if (/^v=spf1(?:\s|$)/i.test(txt.trim())) {
         spfFound = true;
         if (txt.includes('+all')) {
           addFinding('CRITIQUE', 'DNS / Email', 'SPF with +all - anyone can send emails on your behalf', `SPF: ${txt}`, 'Change +all to ~all or -all in the SPF record');
@@ -2972,22 +2975,25 @@ async function auditDns(baseUrl, spinner) {
     }
   } catch (error) {
     spfLookupConclusive = isDnsAbsence(error);
+    spfOutcome = dnsPolicyOutcome('spf', baseDomain, null, error);
   }
 
   if (spfLookupConclusive && !spfFound) {
-    addFinding('MOYENNE', 'DNS / Email', 'No SPF record found', `The domain ${baseDomain} has no SPF record.\nSpoofed messages using @${baseDomain} are not rejected by an SPF policy.`, `Publish an SPF policy adapted to the actual sending providers, or v=spf1 -all when this domain never sends email.`, { classification: 'confirmed', confidence: 'high' });
+    addFinding('MOYENNE', 'DNS / Email', 'No SPF record found', `The domain ${baseDomain} has no SPF record.\nSpoofed messages using @${baseDomain} are not rejected by an SPF policy.`, `Publish an SPF policy adapted to the actual sending providers, or v=spf1 -all when this domain never sends email.`, { classification: 'confirmed', confidence: 'high', check_key: spfOutcome.key });
   }
 
   // ── DMARC (check _dmarc subdomain) ──
   spinner.text = 'Checking DMARC...';
   let dmarcFound = false;
   let dmarcLookupConclusive = false;
+  let dmarcOutcome = dnsPolicyOutcome('dmarc', baseDomain, null);
   try {
     const dmarcRecords = await resolveTxt(`_dmarc.${baseDomain}`);
+    dmarcOutcome = dnsPolicyOutcome('dmarc', baseDomain, dmarcRecords);
     dmarcLookupConclusive = true;
     for (const record of dmarcRecords) {
       const txt = record.join('');
-      if (txt.includes('v=DMARC1')) {
+      if (/^v=DMARC1\s*;/i.test(txt.trim())) {
         dmarcFound = true;
         if (txt.includes('p=none')) {
           addFinding('MOYENNE', 'DNS / Email', 'DMARC in "none" mode - no blocking', `DMARC: ${txt}\nSpoofed emails are reported but not blocked.`, 'Switch to p=quarantine or p=reject after an observation period');
@@ -3000,11 +3006,13 @@ async function auditDns(baseUrl, spinner) {
     }
   } catch (error) {
     dmarcLookupConclusive = isDnsAbsence(error);
+    dmarcOutcome = dnsPolicyOutcome('dmarc', baseDomain, null, error);
   }
 
   if (dmarcLookupConclusive && !dmarcFound) {
-    addFinding('MOYENNE', 'DNS / Email', 'No DMARC record found', `No DMARC policy is published on _dmarc.${baseDomain}.\nReceiving providers have no domain policy for handling spoofed messages.`, `Publish DMARC in monitoring mode first, then move to quarantine or reject after validating legitimate senders.`, { classification: 'confirmed', confidence: 'high' });
+    addFinding('MOYENNE', 'DNS / Email', 'No DMARC record found', `No DMARC policy is published on _dmarc.${baseDomain}.\nReceiving providers have no domain policy for handling spoofed messages.`, `Publish DMARC in monitoring mode first, then move to quarantine or reject after validating legitimate senders.`, { classification: 'confirmed', confidence: 'high', check_key: dmarcOutcome.key });
   }
+  getScanContext()?.checkOutcomes.push(spfOutcome, dmarcOutcome);
 
   // ── DKIM ──
   spinner.text = 'Checking DKIM...';
@@ -4100,8 +4108,8 @@ export function calculateScanScore(sourceFindings = findings) {
 // ──────────── RAPPORT ────────────
 
 function printReport(result = null) {
-  const { score, grade, color } = calculateCoreScore(findings, { minConfidence: 'medium', reliable: result?.score_reliable });
-  const presentation = result?.presentation || calculateScanScore().presentation;
+  const { score, grade, presentation } = buildBlackBoxReport(result?.target || '', result);
+  const color = presentation.tone === 'error' ? chalk.red.bold : presentation.tone === 'success' ? chalk.green.bold : chalk.yellow.bold;
 
   console.log('\n');
   if (presentation.critical) console.log(chalk.red('Critical findings require attention regardless of the numeric score.'));
@@ -4113,7 +4121,7 @@ function printReport(result = null) {
 
   // Score
   console.log('');
-  console.log(`  Score de securite: ${color(` ${grade} `)} ${chalk.gray(`(${score}/100)`)}`);
+  console.log(`  Score de securite: ${color(` ${grade ?? 'N/A'} `)} ${chalk.gray(`(${score ?? 'N/A'}/100)`)}`);
 
   if (findings.length === 0) {
     console.log(chalk.gray('\n  No findings on the checked surface.\n'));
@@ -4152,7 +4160,7 @@ function printReport(result = null) {
   }
 
   console.log('\n' + chalk.bold('━'.repeat(60)));
-  console.log(`  Score: ${color(` ${grade} `)} (${score}/100) - Total: ${findings.length} finding(s)`);
+  console.log(`  Score: ${color(` ${grade ?? 'N/A'} `)} (${score ?? 'N/A'}/100) - Total: ${findings.length} finding(s)`);
   console.log(chalk.gray(`  VICE v${ENGINE_VERSION} - Webba Creative Technologies (c) 2026`));
   console.log(chalk.bold('━'.repeat(60)) + '\n');
 }
@@ -4160,16 +4168,18 @@ function printReport(result = null) {
 export function buildBlackBoxReport(url, result = null, date = new Date().toISOString()) {
   const calculated = result?.score_breakdown || calculateScanScore(result?.findings || findings);
   const hasResultScore = result && Object.hasOwn(result, 'score');
-  const hasResultGrade = result && Object.hasOwn(result, 'grade');
+  const candidateScore = hasResultScore ? result.score : calculated.score;
+  const grade = gradeForScore(candidateScore);
+  const score = grade === null ? null : candidateScore;
   return {
     url,
     date,
-    score: hasResultScore ? result.score : calculated.score,
-    grade: hasResultGrade ? result.grade : calculated.grade,
+    score,
+    grade,
     engine_version: result?.engine_version || ENGINE_VERSION,
     ruleset_version: result?.ruleset_version || RULESET_VERSION,
     scoring_version: result?.scoring_version || SCORING_VERSION,
-    presentation: scorePresentation(hasResultScore ? result.score : calculated.score, {
+    presentation: scorePresentation(score, {
       criticalCount: (result?.findings || findings).filter(f => !f.baselined && ['CRITICAL', 'CRITIQUE'].includes(f.severity)).length,
       highCount: (result?.findings || findings).filter(f => !f.baselined && ['HIGH', 'ELEVEE'].includes(f.severity)).length,
       reliable: result?.score_reliable,
@@ -4181,6 +4191,7 @@ export function buildBlackBoxReport(url, result = null, date = new Date().toISOS
     errors: result?.errors || [],
     metrics: result?.metrics || null,
     coverage: result?.coverage || null,
+    check_outcomes: result?.check_outcomes || [],
     ai_rag_audit: result?.ai_rag_audit || null,
     score_breakdown: {
       total_penalty: calculated.total_penalty,
@@ -4609,6 +4620,7 @@ async function runScanInternal(config, httpClient, context) {
     metrics: scanMetrics,
     coverage,
     score_reliable: coverage.status === 'complete',
+    check_outcomes: context.checkOutcomes.slice(0, 100),
     presentation: scorePresentation(scoreAvailable ? score.score : null, {
       criticalCount: context.findings.filter(f => ['CRITICAL', 'CRITIQUE'].includes(f.severity)).length,
       highCount: context.findings.filter(f => ['HIGH', 'ELEVEE'].includes(f.severity)).length,

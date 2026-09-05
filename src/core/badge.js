@@ -11,7 +11,7 @@ const TONE_COLORS = { success: 'brightgreen', warning: 'yellow', error: 'critica
 
 export function generateBadge(score, grade, options = {}) {
   const presentation = scorePresentation(score, options);
-  const suffix = presentation.critical ? ' - critical' : presentation.provisional ? ' - provisional' : '';
+  const suffix = (presentation.critical ? ' - critical' : '') + (presentation.provisional ? ' - provisional' : '');
   return {
     schemaVersion: 1,
     label: 'vice security',

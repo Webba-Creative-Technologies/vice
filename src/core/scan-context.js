@@ -5,6 +5,7 @@ const scanStorage = new AsyncLocalStorage();
 export function createScanContext(options = {}) {
   return {
     findings: [],
+    checkOutcomes: [],
     discoveredIps: new Set(),
     authContext: options.authContext || null,
     scope: options.scope || null,

@@ -28,6 +28,8 @@ test('critical and provisional evidence remains visible on report surfaces', asy
     assert.match(badge.message, /critical/);
     assert.equal(generateBadge(100, 'F', { reliable: false }).color, 'yellow');
     assert.match(generateBadge(100, 'F').message, /^A/);
+    assert.equal(buildBlackBoxReport('https://fixture.example', { score: null, grade: 'A', findings: [] }).score, null);
+    assert.equal(buildBlackBoxReport('https://fixture.example', { score: '<script>', grade: '<script>', findings: [] }).grade, null);
   } finally {
     clearFindings();
     await rm(directory, { recursive: true, force: true });
