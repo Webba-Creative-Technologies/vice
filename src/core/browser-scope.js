@@ -1,3 +1,5 @@
+import { permitsLoginRequest } from './login-audit.js';
+import { isGraphqlRead } from './surfaces.js';
 const LOCAL_PROTOCOLS = new Set(['about:', 'blob:', 'data:']);
 const PASSIVE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
 
@@ -20,7 +22,7 @@ export async function installScopedRequestInterception(page, options = {}) {
 
       const url = new URL(request.url());
       const method = String(request.method?.() || 'GET').toUpperCase();
-      if (!PASSIVE_METHODS.has(method)) {
+      if (!permitsLoginRequest(options.loginProbe, url, method, request.postData?.()) && !PASSIVE_METHODS.has(method) && !(method === 'POST' && scope.isPrimaryOrigin(url) && isGraphqlRead(request.postData?.()))) {
         metrics.blocked++;
         metrics.mutations_blocked = (metrics.mutations_blocked || 0) + 1;
         await request.abort('blockedbyclient');

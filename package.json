@@ -1,6 +1,6 @@
 {
   "name": "vice-security",
-  "version": "3.4.1",
+  "version": "3.5.0",
   "description": "VICE - Vulnerability Inspector & Code Examiner | Black-box & white-box security auditor for web applications",
   "author": "Webba Creative Technologies",
   "license": "MIT",
@@ -14,6 +14,7 @@
     "src/",
     "scan.js",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {

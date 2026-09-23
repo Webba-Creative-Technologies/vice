@@ -5,7 +5,7 @@ import { classifyCorsPolicy } from '../src/core/detectors/cors.js';
 
 const evilOrigin = 'https://evil.example';
 
-test('CORS confirms reflected origins with credentials', () => {
+test('CORS detects a risky header policy without claiming credential theft', () => {
   const result = classifyCorsPolicy({
     requestOrigin: evilOrigin,
     allowOrigin: evilOrigin,
@@ -13,7 +13,7 @@ test('CORS confirms reflected origins with credentials', () => {
   });
 
   assert.equal(result.kind, 'reflected-origin-with-credentials');
-  assert.equal(result.severity, 'CRITIQUE');
+  assert.equal(result.severity, 'MOYENNE');
 });
 
 test('CORS lowers reflected origins without credentials', () => {

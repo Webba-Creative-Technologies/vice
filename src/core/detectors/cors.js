@@ -13,9 +13,9 @@ export function classifyCorsPolicy({ requestOrigin, allowOrigin, allowCredential
     if (credentials) {
       return {
         kind: 'reflected-origin-with-credentials',
-        severity: 'CRITIQUE',
+        severity: 'MOYENNE',
         title: 'Arbitrary CORS origin reflected with credentials',
-        detail: `The server reflects ${requested} and allows credentials. A malicious origin can read authenticated responses.`,
+        detail: `The server reflects ${requested} and allows credentials. Authenticated cross-origin data access has not been demonstrated.`,
       };
     }
 

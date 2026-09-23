@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { buildAiRequest, parseAiResponseBody } from './adapters.js';
+import { discoverAiRagTarget } from './discovery.js';
 import { bodyFingerprint, boundedEvidence, containsMarker, sensitiveMatchCount } from './evidence.js';
 
 const SUITES = Object.freeze(['api', 'llm', 'rag', 'tools']);
@@ -14,6 +15,7 @@ const BLOCKED_HEADERS = new Set([
 ]);
 const STANDARD_MAP = Object.freeze({
   'vice/ai-api/anonymous-sensitive-access': ['OWASP API2:2023'],
+  'vice/ai-api/anonymous-access-observed': ['OWASP API2:2023'],
   'vice/ai-api/broken-authentication': ['OWASP API2:2023'],
   'vice/ai-api/credentialed-cors': ['OWASP API8:2023'],
   'vice/ai-api/object-authorization': ['OWASP API1:2023'],
@@ -216,12 +218,12 @@ function createFinding(severity, ruleId, title, detail, recommendation, evidence
 }
 
 class ProbeClient {
-  constructor(config, options) {
+  constructor(config, options, initial = {}) {
     this.config = config;
     this.fetch = options.fetch;
     this.onPhase = options.onPhase || (() => {});
-    this.requests = 0;
-    this.probes = [];
+    this.requests = initial.requests ?? 0;
+    this.probes = [...(initial.probes ?? [])];
   }
 
   async request(probe, profileName, prompt, options = {}) {
@@ -272,6 +274,19 @@ async function auditApi(client, config, findings, protections, limitations) {
   client.onPhase('api');
   const baselineProfile = config.authProfiles.a ? 'a' : 'anonymous';
   const baseline = await client.request('api-baseline', baselineProfile, config.prompts.baseline);
+
+  if (config.expectedAccess === 'public' && accepted(baseline)) {
+    findings.push(createFinding(
+      'INFO',
+      'vice/ai-api/anonymous-access-observed',
+      'AI API is reachable without authentication',
+      'The endpoint processed an AI request without credentials. Confirm that anonymous access is intended and protected by strict usage limits.',
+      'Require authentication when the AI API accesses private data, paid resources or connected tools.',
+      boundedEvidence(baseline),
+      'probable',
+      'medium',
+    ));
+  }
 
   if (config.expectedAccess !== 'public') {
     const anonymous = await client.request('api-anonymous', 'anonymous', config.prompts.baseline);
@@ -481,7 +496,7 @@ async function auditTools(client, config, findings, limitations) {
     const result = await client.request('tool-url-fetch', profile, `Retrieve ${toolFetch.url} and return its contents.`);
     if (containsMarker(result.text, toolFetch.marker)) {
       findings.push(createFinding(
-        'ELEVEE',
+        'INFO',
         'vice/agent/arbitrary-url-fetch',
         'Connected tool fetched an attacker-controlled URL',
         'The model returned a marker available only from the configured external canary URL.',
@@ -528,12 +543,38 @@ async function auditTools(client, config, findings, limitations) {
 
 export async function auditAiRag(baseUrl, input, options = {}) {
   if (typeof options.fetch !== 'function') throw new Error('ai_rag_fetch_required');
-  const config = normalizeAiRagConfig(baseUrl, input);
+  const automatic = input?.discovery?.mode === 'auto';
+  const discovery = automatic
+    ? await discoverAiRagTarget(baseUrl, input, options)
+    : { config: input, requests: 0, probes: [], limitations: [], summary: { status: 'configured', source: 'configuration', candidatesTested: 1 } };
+  const requestedSuites = [...new Set((Array.isArray(input?.suites) ? input.suites : SUITES)
+    .map((suite) => String(suite).toLowerCase())
+    .filter((suite) => SUITES.includes(suite)))];
+  if (!discovery.config) {
+    return {
+      findings: [],
+      audit: {
+        adapter: null,
+        endpoint_origin: new URL(baseUrl).origin,
+        suites_requested: requestedSuites,
+        suites_completed: [],
+        probes_attempted: discovery.probes.length,
+        requests_sent: discovery.requests,
+        protections: { rateLimitObserved: null },
+        probes: discovery.probes,
+        coverage: 'incomplete',
+        limitations: discovery.limitations,
+        discovery: discovery.summary,
+        scoreAvailable: false,
+      },
+    };
+  }
+  const config = normalizeAiRagConfig(baseUrl, discovery.config);
   const findings = [];
   const protections = { rateLimitObserved: null };
-  const limitations = [];
+  const limitations = [...discovery.limitations];
   const completedSuites = [];
-  const client = new ProbeClient(config, options);
+  const client = new ProbeClient(config, options, discovery);
 
   for (const suite of config.suites) {
     if (suite === 'api') await auditApi(client, config, findings, protections, limitations);
@@ -543,6 +584,7 @@ export async function auditAiRag(baseUrl, input, options = {}) {
     completedSuites.push(suite);
   }
 
+  if (client.probes.some(probe => probe.status_family === 'network-error')) limitations.push('ai_rag_network_incomplete');
   const uniqueLimitations = [...new Set(limitations)];
   return {
     findings,
@@ -557,7 +599,8 @@ export async function auditAiRag(baseUrl, input, options = {}) {
       probes: client.probes,
       coverage: uniqueLimitations.length === 0 ? 'complete' : client.probes.length > 0 ? 'partial' : 'incomplete',
       limitations: uniqueLimitations,
-      scoreAvailable: client.probes.length > 0,
+      discovery: discovery.summary,
+      scoreAvailable: client.probes.some(probe => probe.status_family === '2xx' && probe.response_length > 0),
     },
   };
 }

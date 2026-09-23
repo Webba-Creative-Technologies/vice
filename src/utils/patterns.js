@@ -118,6 +118,8 @@ function isPlaceholderValue(value) {
 }
 
 export const SECRET_PATTERNS = [
+  { name: 'Supabase Secret Key',    regex: /sb_secret_[A-Za-z0-9_-]{20,}/g },
+  { name: 'Supabase Publishable Key', regex: /sb_publishable_[A-Za-z0-9_-]{20,}/g },
   { name: 'Supabase Service Role',  regex: new RegExp(SUPABASE_JWT_SOURCE, 'g'), validate: token => classifySupabaseJwt(token) === 'service_role' },
   { name: 'Discord Webhook',        regex: /https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+/gi },
   { name: 'Stripe Secret Key',      regex: /sk_(live|test)_[a-zA-Z0-9]{20,}/g },
@@ -142,6 +144,12 @@ export const SECRET_PATTERNS = [
   { name: 'Private Key',            regex: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g },
   { name: 'Bearer Token',           regex: /Bearer\s+[a-zA-Z0-9_\-\.]+/g },
 ];
+
+export const SUPABASE_ANON_PATTERN = {
+  name: 'Supabase Anon Key',
+  regex: new RegExp(SUPABASE_JWT_SOURCE, 'g'),
+  validate: token => classifySupabaseJwt(token) === 'anon',
+};
 
 export const IP_PATTERN = /(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)(?::\d{2,5})?(?!\d)/g;
 

@@ -1,3 +1,4 @@
+import { isGraphqlRead } from './surfaces.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ScopeError } from './scope.js';
 
@@ -14,7 +15,7 @@ function isApprovedPost(url, options) {
   }
   if (options.readOnly === 'graphql-query') {
     const body = typeof options.body === 'string' ? options.body : '';
-    return body.length > 0 && !/\bmutation\b/i.test(body);
+    return isGraphqlRead(body);
   }
   return false;
 }
