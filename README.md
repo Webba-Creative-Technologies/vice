@@ -42,7 +42,7 @@ Node.js 22.12 or later is required. Upgrade Node before updating VICE.
 Chromium remains optional for local audits; remote scans need it for full
 browser coverage. An HTTP fallback is reported as incomplete coverage.
 
-The 3.4.2 candidate improves observed application discovery, detection evidence
+VICE 3.5.0 improves observed application discovery, detection evidence
 and scoring. Confirmed critical and high findings cap the score at 39 and 69.
 Partial coverage caps it at 89; incomplete coverage caps it at 49. Existing
 reports keep their original scores. See [the changelog](CHANGELOG.md).

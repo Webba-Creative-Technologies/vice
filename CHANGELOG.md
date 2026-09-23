@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.4.2 (unreleased)
+## 3.5.0 (2026-09-24)
 
 - Validate the candidate against the unchanged 3.4.1 engine on paired local
   applications; include delayed DOM execution in XSS observation.
