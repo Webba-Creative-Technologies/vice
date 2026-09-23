@@ -1,6 +1,11 @@
 # Changelog
 
-## 3.5.0 (unreleased)
+## 3.4.2 (unreleased)
+
+- Validate the candidate against the unchanged 3.4.1 engine on paired local
+  applications; include delayed DOM execution in XSS observation.
+- Discover login forms on the requested page and observed application pages;
+  exclude registration forms from synthetic login submissions.
 
 - Share a bounded inventory of application routes, forms, parameters, API
   responses and read-only GraphQL requests across remote audit modules.

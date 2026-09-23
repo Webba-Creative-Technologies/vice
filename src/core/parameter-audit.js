@@ -30,16 +30,20 @@ export async function auditReflectedXss({ inventory, baseUrl, fetch, page, findi
     const html = await response.text();
     if (!/html/i.test(response.headers.get('content-type') || '')) continue;
     const reflected = html.includes(marker);
+    const eventPayload = `"><img src="data:image/png,vice" onerror="alert('${marker}')">`;
     const payloads = reflected ? [
-      `"><svg onload=alert('${marker}')>`,
+      eventPayload,
       `</script><script>alert('${marker}')</script>`,
       `';alert('${marker}');//`,
-    ] : [`"><svg onload=alert('${marker}')>`];
+    ] : [eventPayload];
     let executed = false;
     let loaded = false;
     for (const payload of payloads) {
+      let executionObserved;
+      const execution = new Promise(resolve => { executionObserved = resolve; });
+      let observationTimer;
       const onDialog = async dialog => {
-        if (dialog.message() === marker) executed = true;
+        if (dialog.message() === marker) { executed = true; executionObserved(); }
         await dialog.dismiss().catch(() => {});
       };
       page.on('dialog', onDialog);
@@ -48,9 +52,9 @@ export async function auditReflectedXss({ inventory, baseUrl, fetch, page, findi
         else url.searchParams.set(target.name, payload);
         await page.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 6000 });
         loaded = true;
-        await new Promise(resolve => setTimeout(resolve, 150));
+        await Promise.race([execution, new Promise(resolve => { observationTimer = setTimeout(resolve, 1000); })]);
       } catch { outcome?.('unknown'); }
-      finally { page.off('dialog', onDialog); }
+      finally { clearTimeout(observationTimer); page.off('dialog', onDialog); }
       if (executed) break;
     }
     if (executed) finding('ELEVEE', 'XSS', `Script execution through parameter ${target.name}`,

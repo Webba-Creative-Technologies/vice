@@ -1,0 +1,567 @@
+{
+  "node": "v22.20.0",
+  "repetitions": 1,
+  "requested_repetitions": 1,
+  "case_count": 13,
+  "totals": {
+    "baseline": {
+      "found": 2,
+      "expected": 11,
+      "false_positives": 3,
+      "median_pass_duration_ms": 128307,
+      "errors": 0,
+      "stable": true
+    },
+    "candidate": {
+      "found": 11,
+      "expected": 11,
+      "false_positives": 0,
+      "median_pass_duration_ms": 79923,
+      "errors": 0,
+      "stable": true
+    }
+  },
+  "duration_reduction_percent": 37.70955598681288,
+  "cases": [
+    {
+      "id": "application-vulnerable",
+      "expected": [
+        "api-credentials",
+        "sql",
+        "traversal",
+        "redirect",
+        "xss"
+      ],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [
+          "api-credentials",
+          "sql",
+          "traversal",
+          "redirect",
+          "xss"
+        ],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 22217,
+          "min": 22217,
+          "max": 22217
+        },
+        "requests": 97,
+        "scores": [
+          96
+        ]
+      },
+      "candidate": {
+        "detected": [
+          "xss",
+          "sql",
+          "traversal",
+          "redirect",
+          "api-credentials"
+        ],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 8455,
+          "min": 8455,
+          "max": 8455
+        },
+        "requests": 111,
+        "scores": [
+          39
+        ]
+      }
+    },
+    {
+      "id": "application-fixed",
+      "expected": [],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 21746,
+          "min": 21746,
+          "max": 21746
+        },
+        "requests": 97,
+        "scores": [
+          96
+        ]
+      },
+      "candidate": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 11507,
+          "min": 11507,
+          "max": 11507
+        },
+        "requests": 113,
+        "scores": [
+          96
+        ]
+      }
+    },
+    {
+      "id": "direct-vulnerable",
+      "expected": [
+        "env",
+        "api-credentials"
+      ],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [
+          "env",
+          "api-credentials"
+        ],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 8301,
+          "min": 8301,
+          "max": 8301
+        },
+        "requests": 79,
+        "scores": [
+          70
+        ]
+      },
+      "candidate": {
+        "detected": [
+          "env",
+          "api-credentials"
+        ],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 4320,
+          "min": 4320,
+          "max": 4320
+        },
+        "requests": 66,
+        "scores": [
+          39
+        ]
+      }
+    },
+    {
+      "id": "direct-fixed",
+      "expected": [],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 8256,
+          "min": 8256,
+          "max": 8256
+        },
+        "requests": 79,
+        "scores": [
+          100
+        ]
+      },
+      "candidate": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 4306,
+          "min": 4306,
+          "max": 4306
+        },
+        "requests": 66,
+        "scores": [
+          100
+        ]
+      }
+    },
+    {
+      "id": "supabase-vulnerable",
+      "expected": [
+        "supabase"
+      ],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [
+          "supabase"
+        ],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 8225,
+          "min": 8225,
+          "max": 8225
+        },
+        "requests": 38,
+        "scores": [
+          100
+        ]
+      },
+      "candidate": {
+        "detected": [
+          "supabase"
+        ],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 4253,
+          "min": 4253,
+          "max": 4253
+        },
+        "requests": 8,
+        "scores": [
+          39
+        ]
+      }
+    },
+    {
+      "id": "supabase-fixed",
+      "expected": [],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 8228,
+          "min": 8228,
+          "max": 8228
+        },
+        "requests": 38,
+        "scores": [
+          100
+        ]
+      },
+      "candidate": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 4248,
+          "min": 4248,
+          "max": 4248
+        },
+        "requests": 8,
+        "scores": [
+          100
+        ]
+      }
+    },
+    {
+      "id": "login-vulnerable",
+      "expected": [
+        "login-injection"
+      ],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [
+          "login-injection"
+        ],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 588,
+          "min": 588,
+          "max": 588
+        },
+        "requests": 10,
+        "scores": [
+          100
+        ]
+      },
+      "candidate": {
+        "detected": [
+          "login-injection"
+        ],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 5342,
+          "min": 5342,
+          "max": 5342
+        },
+        "requests": 9,
+        "scores": [
+          69
+        ]
+      }
+    },
+    {
+      "id": "login-fixed",
+      "expected": [],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 588,
+          "min": 588,
+          "max": 588
+        },
+        "requests": 10,
+        "scores": [
+          100
+        ]
+      },
+      "candidate": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 5602,
+          "min": 5602,
+          "max": 5602
+        },
+        "requests": 11,
+        "scores": [
+          69
+        ]
+      }
+    },
+    {
+      "id": "graphql-vulnerable",
+      "expected": [
+        "graphql-credentials"
+      ],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [
+          "graphql-credentials"
+        ],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 8259,
+          "min": 8259,
+          "max": 8259
+        },
+        "requests": 64,
+        "scores": [
+          100
+        ]
+      },
+      "candidate": {
+        "detected": [
+          "graphql-credentials"
+        ],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 4259,
+          "min": 4259,
+          "max": 4259
+        },
+        "requests": 54,
+        "scores": [
+          85
+        ]
+      }
+    },
+    {
+      "id": "graphql-fixed",
+      "expected": [],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 8275,
+          "min": 8275,
+          "max": 8275
+        },
+        "requests": 64,
+        "scores": [
+          100
+        ]
+      },
+      "candidate": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 4303,
+          "min": 4303,
+          "max": 4303
+        },
+        "requests": 54,
+        "scores": [
+          100
+        ]
+      }
+    },
+    {
+      "id": "browser-false-signals",
+      "expected": [],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [
+          "xss",
+          "redirect",
+          "traversal"
+        ],
+        "missed": [],
+        "false_positives": [
+          "xss",
+          "redirect",
+          "traversal"
+        ],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 11040,
+          "min": 11040,
+          "max": 11040
+        },
+        "requests": 15,
+        "scores": [
+          51
+        ]
+      },
+      "candidate": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 7999,
+          "min": 7999,
+          "max": 7999
+        },
+        "requests": 40,
+        "scores": [
+          96
+        ]
+      }
+    },
+    {
+      "id": "delayed-dom-vulnerable",
+      "expected": [
+        "xss"
+      ],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [
+          "xss"
+        ],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 11293,
+          "min": 11293,
+          "max": 11293
+        },
+        "requests": 32,
+        "scores": [
+          96
+        ]
+      },
+      "candidate": {
+        "detected": [
+          "xss"
+        ],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 7528,
+          "min": 7528,
+          "max": 7528
+        },
+        "requests": 40,
+        "scores": [
+          69
+        ]
+      }
+    },
+    {
+      "id": "delayed-dom-fixed",
+      "expected": [],
+      "repetitions": 1,
+      "baseline": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 11291,
+          "min": 11291,
+          "max": 11291
+        },
+        "requests": 32,
+        "scores": [
+          96
+        ]
+      },
+      "candidate": {
+        "detected": [],
+        "missed": [],
+        "false_positives": [],
+        "stable": true,
+        "errors": 0,
+        "duration_ms": {
+          "median": 7801,
+          "min": 7801,
+          "max": 7801
+        },
+        "requests": 40,
+        "scores": [
+          96
+        ]
+      }
+    }
+  ]
+}

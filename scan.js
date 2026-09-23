@@ -6,7 +6,7 @@ import { auditObjectAuthorization } from './src/core/authorization-audit.js';
 import { recordAuditCheck, publicClientSources } from './src/core/audit-checks.js';
 import { inspectPublicObject, objectUrl } from './src/core/storage-audit.js';
 import { auditObservedQueries } from './src/core/observed-api.js';
-import { createLoginProbe, auditLoginForm } from './src/core/login-audit.js';
+import { createLoginProbe, auditLoginForm, discoverLoginPage } from './src/core/login-audit.js';
 import { auditReflectedXss, auditInputParameters } from './src/core/parameter-audit.js';
 import { createSurfaceInventory, collectPageSurfaces } from './src/core/surfaces.js';
 import { analyzeBundleExposure, secretFindingPolicy } from './src/core/detectors/bundle-secrets.js';
@@ -1708,25 +1708,7 @@ async function auditLoginSecurity(baseUrl, spinner) {
 
   // ── DETECT : Find the login page ──
   spinner.text = 'Searching for login page...';
-  const loginPaths = ['/login', '/auth/login', '/signin', '/auth/signin', '/sign-in', '/auth/sign-in', '/connexion', '/auth', '/account/login', '/user/login'];
-  let loginUrl = null;
-
-  // If the given URL is already a login page, use it
-  if (/login|signin|sign-in|auth|connexion/i.test(baseUrl)) {
-    loginUrl = baseUrl;
-  } else {
-    for (const path of loginPaths) {
-      const testUrl = new URL(baseUrl).origin + path;
-      const res = await safeFetch(testUrl);
-      if (res && res.status === 200) {
-        const body = await res.text();
-        if (/password|mot de passe|login|connexion|sign.?in/i.test(body)) {
-          loginUrl = testUrl;
-          break;
-        }
-      }
-    }
-  }
+  const loginUrl = await discoverLoginPage({ page, baseUrl, inventory: getScanContext()?.surfaces, fetch: safeFetch });
 
   if (!loginUrl) {
     addFinding('INFO', 'Login Audit', 'No local login form found', `No local credential form was detected on ${baseUrl}. Federated or externally hosted authentication may still be present.`, 'Audit custom or external authentication entry points separately.');
@@ -1735,10 +1717,6 @@ async function auditLoginSecurity(baseUrl, spinner) {
   }
 
   addFinding('INFO', 'Login Audit', `Login page found: ${loginUrl}`, '', '');
-
-  // Load the login page
-  await page.goto(loginUrl, { waitUntil: 'networkidle2', timeout: 15000 });
-  await page.waitForNetworkIdle({ idleTime: 250, timeout: 1500 }).catch(() => {});
 
   // ── CHECK 1 : Form GET vs POST ──
   spinner.text = 'Checking form method...';

@@ -1,4 +1,29 @@
 import { randomUUID } from 'node:crypto';
+import { surfaceUrl } from './surfaces.js';
+
+export async function discoverLoginPage({ page, baseUrl, inventory, fetch }) {
+  const observed = [...(inventory?.forms.values() || [])].filter(form => form.inputs.some(input => input.type === 'password')).map(form => form.pageUrl);
+  const common = ['/login', '/auth/login', '/signin', '/auth/signin', '/sign-in', '/auth/sign-in', '/connexion', '/auth', '/account/login', '/user/login'];
+  const candidates = [...new Set([baseUrl, ...observed, ...common.map(path => new URL(path, baseUrl).href)])].slice(0, 16);
+  let rendered = 0;
+  for (const value of candidates) {
+    const url = surfaceUrl(value, baseUrl);
+    if (!url) continue;
+    if (value !== baseUrl && !observed.includes(value)) {
+      const response = await fetch(url.href);
+      if (response?.status !== 200 || !/password|mot de passe|login|connexion|sign.?in/i.test(await response.text())) continue;
+    }
+    if (++rendered > 4) break;
+    try {
+      const response = await page.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 6000 });
+      if (!response || response.status() >= 400) continue;
+      await page.waitForNetworkIdle({ idleTime: 250, timeout: 1500 }).catch(() => {});
+      if (new URL(page.url()).origin !== new URL(baseUrl).origin) continue;
+      if (await page.evaluate(() => [...document.forms].some(form => form.querySelector('input[type="password"]')))) return page.url();
+    } catch {}
+  }
+  return null;
+}
 
 export function createLoginProbe(origin) {
   const marker = `vice-${randomUUID()}`;
@@ -20,6 +45,9 @@ export async function auditLoginForm(page, probe, finding) {
     const password = document.querySelector('input[type="password"]');
     const form = password?.form;
     if (!form) return null;
+    const submit = form.querySelector('button[type="submit"], button:not([type]), input[type="submit"]');
+    if (form.querySelectorAll('input[type="password"]').length > 1 || password.autocomplete === 'new-password'
+      || /^(?:sign\s*up|register|create account|créer un compte)/i.test((submit?.textContent || submit?.value || '').trim())) return null;
     const email = form.querySelector('input[type="email"], input[name*="email"], input[name*="user"], input[autocomplete="username"]');
     return email ? { password: password.name || password.id, email: email.name || email.id } : null;
   });

@@ -69,7 +69,7 @@ test('runScan integrates findings, metrics, and coverage locally', async () => {
     assert.equal(exposedEnv?.severity, 'CRITIQUE');
     assert.match(exposedEnv?.rule_id || '', /^vice\//);
     assert.match(exposedEnv?.fingerprint || '', /^[a-f0-9]{16}$/);
-    assert.equal(exposedEnv?.engine_version, '3.5.0');
+    assert.equal(exposedEnv?.engine_version, '3.4.2');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -90,7 +90,7 @@ test('black-box reports explain score and coverage', () => {
     score_reliable: false,
   }, '2026-07-12T00:00:00.000Z');
 
-  assert.equal(report.engine_version, '3.5.0');
+  assert.equal(report.engine_version, '3.4.2');
   assert.equal(report.ruleset_version, '2026.09.23.1');
   assert.equal(report.score_reliable, false);
   assert.equal(report.score_breakdown.total_penalty, 15);
